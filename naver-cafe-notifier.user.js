@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v9
+// @name         네이버 카페 '내 소식' 데스크톱 알리미 v10
 // @namespace    https://section.cafe.naver.com/
-// @version      9.0.0
+// @version      10.0.0
 // @description  네이버 카페 '내 소식'의 안 읽은 댓글·답글·채팅을 감지해 데스크톱 알림을 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = 'v9';
+    const VERSION = 'v10';
 
     /* ============================================================
      * 1. 설정
@@ -26,15 +26,21 @@
     const CONFIG = {
         RELOAD_INTERVAL_SEC: 60,
 
-        ENABLE_REPLY: true,         // "OOO 내 댓글의 답글"
-        ENABLE_COMMENT: true,       // "OOO 내 글의 댓글"
-        ENABLE_CHAT: true,          // 좌측 사이드바 채팅 뱃지
-        ENABLE_LIKE_COMMENT: false, // "내 댓글을 N명이 좋아해요"
-        ENABLE_LIKE_POST: false,    // "OOO 님이 내 글을 좋아합니다"
+        ENABLE_REPLY: true,
+        ENABLE_COMMENT: true,
+        ENABLE_CHAT: true,
+        ENABLE_LIKE_COMMENT: false,
+        ENABLE_LIKE_POST: false,
 
-        ONLY_UNREAD: true,          // 안 읽은 항목(초록 배경)만 알림
-        SHOW_SUBJECT: false,        // 알림에 게시글 제목까지 넣을지
-        SHOW_TOTAL_COMMENTS: false, // 게시글 전체 댓글 수(💬N)를 알림에 넣을지
+        ONLY_UNREAD: true,
+        SHOW_SUBJECT: false,
+        SHOW_TOTAL_COMMENTS: false,
+
+        /* --- 알림 표시 --- */
+        COMPACT_BODY: false,     // true면 단건 알림도 "카페 · 아이디" 를 한 줄로 합침(2줄이 됨)
+        NOTIFY_LINE_WIDTH: 52,   // 한 줄 폭(한글 2, 영문 1 기준). 넘으면 … 처리
+        MERGE_MAX_ITEMS: 3,      // 여러 건일 때 나열할 최대 개수
+        CONTENT_PREFIX: '└ ',    // 내용 줄 들여쓰기 표시
 
         NOTIFY_ICON: '',
         DOM_READY_DELAY_MS: 3000,
@@ -64,7 +70,6 @@
         RE_ANY: /좋아해요|좋아합니다|댓글|답글/,
         RE_TIME: /(방금\s*전|\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2})/,
         RE_TIME_G: /방금\s*전|\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2}\.?/g,
-        /* 가운뎃점 후보 — 폰트/유니코드에 따라 다른 문자가 쓰일 수 있다 */
         SEP: /\s*[·・ㆍ•∙‧|]\s*/,
         JUNK_CLASS: /popover|pop_over|tooltip|layer|dropdown|modal|gnb_/i,
         JUNK_ANCESTOR: '[class*="popover" i], [class*="pop_over" i], [class*="tooltip" i], [class*="layer" i]',
@@ -78,11 +83,26 @@
      * ========================================================== */
     const log = (...a) => { if (CONFIG.DEBUG) console.log('%c[카페알리미]', 'color:#03c75a;font-weight:700', ...a); };
     const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-    const truncate = (s, n) => { s = norm(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
     const cls = (el) => {
         const c = el.className;
         return typeof c === 'string' ? c : (c && c.baseVal) || '';
     };
+
+    /* 한글은 폭 2, 영문·숫자는 1로 세어 실제 보이는 길이에 맞춰 자른다 */
+    function charWidth(ch) { return ch.charCodeAt(0) < 0x1100 ? 1 : 2; }
+
+    function clipWidth(s, maxW) {
+        s = norm(s);
+        let w = 0, out = '';
+        for (const ch of s) {
+            const cw = charWidth(ch);
+            if (w + cw > maxW - 1) return out + '…';
+            out += ch; w += cw;
+        }
+        return out;
+    }
+
+    const truncate = (s, n) => { s = norm(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 
     function isVisible(el) {
         const r = el.getBoundingClientRect();
@@ -254,11 +274,6 @@
         return { type: null, ti: -1 };
     }
 
-    /* 꼬리말(카페명 · 시간) 파싱.
-     * 두 가지 형태를 모두 처리한다:
-     *   A) 한 줄:  "테스트용카페이다 · 1분 전"
-     *   B) 두 줄:  "테스트용카페이다" / "1분 전"   ← 가운뎃점이 CSS로 그려질 때
-     * footStart 는 본문이 끝나는 지점(= 꼬리말 시작 인덱스). */
     function parseFooter(lines) {
         let tIdx = -1;
         for (let i = lines.length - 1; i >= 0; i--) {
@@ -268,14 +283,8 @@
 
         const parts = lines[tIdx].split(HINTS.SEP).map(norm).filter(Boolean);
         if (parts.length >= 2) {
-            return {
-                cafe: parts.slice(0, -1).join(' · '),
-                time: parts[parts.length - 1],
-                footStart: tIdx
-            };
+            return { cafe: parts.slice(0, -1).join(' · '), time: parts[parts.length - 1], footStart: tIdx };
         }
-
-        // 시간만 있는 줄 → 바로 앞 줄을 카페명으로 본다 (너무 길면 본문일 가능성이 커 제외)
         const prev = tIdx > 0 ? lines[tIdx - 1] : '';
         const looksLikeCafe = prev && prev.length <= 40 && !HINTS.RE_TIME.test(prev);
         return {
@@ -290,7 +299,6 @@
         const { type, ti } = classify(lines, text);
         const { cafe, time, footStart } = parseFooter(lines);
 
-        // 작성자
         let author = '';
         if (ti >= 0) {
             const m = /^(.+?)\s*(?:님이)?\s*내\s*(?:글|댓글)(?:을|의)/.exec(lines[ti]);
@@ -299,14 +307,12 @@
         }
         if (/^\d+명$/.test(author)) author = '';
 
-        // 게시글 전체 댓글 수 (💬N) — 새 소식 건수가 아니다
         let totalComments = 0;
         if (ti >= 0) {
             const cm = /(\d+)\s*$/.exec(lines[ti]);
             if (cm) totalComments = parseInt(cm[1], 10) || 0;
         }
 
-        // 본문: 종류 줄 다음부터 꼬리말 직전까지
         const body = ti >= 0 ? lines.slice(ti + 1, Math.max(ti + 1, footStart)) : [];
         const content = body[0] || '';
         const subject = body[1] || '';
@@ -314,7 +320,6 @@
         const link = el.querySelector('a[href]');
         const href = link ? link.href : '';
 
-        // 키에서는 시간 표기만 제거한다 (숫자는 남겨야 새 댓글을 구분할 수 있음)
         const sig = norm(text.replace(HINTS.RE_TIME_G, ''));
         const key = (href ? href.split('?')[0] : 'nolink') + '::' + hashText(sig);
 
@@ -324,23 +329,42 @@
                  href, el, unread: ur.unread, color: ur.color };
     }
 
-    /* 알림 본문: 카페이름 / 작성자 / 내용 */
+    /* ------------------------------------------------------------
+     * 알림 문구 조립
+     *  단건  →  카페이름 / 작성자 / 내용   (COMPACT_BODY면 카페·작성자를 한 줄로)
+     *  여러건 →  [종류] 카페 · 작성자
+     *            └ 내용
+     * 알림 본문은 순수 텍스트라 글씨 크기·색을 못 바꾸므로
+     * 들여쓰기 기호로 계층을 표현한다.
+     * ---------------------------------------------------------- */
+    const W = () => CONFIG.NOTIFY_LINE_WIDTH;
+
     function bodyOf(i) {
         const p = [];
-        if (i.cafe) p.push(i.cafe);
         let who = i.author;
         if (CONFIG.SHOW_TOTAL_COMMENTS && i.totalComments) who += ' (댓글 ' + i.totalComments + ')';
-        if (norm(who)) p.push(norm(who));
-        if (i.content) p.push(truncate(i.content, 100));
-        if (CONFIG.SHOW_SUBJECT && i.subject) p.push('— ' + truncate(i.subject, 60));
-        if (!p.length) p.push(truncate(i.text, 100));
+        who = norm(who);
+
+        if (CONFIG.COMPACT_BODY) {
+            const headline = [i.cafe, who].filter(Boolean).join(' · ');
+            if (headline) p.push(clipWidth(headline, W()));
+        } else {
+            if (i.cafe) p.push(clipWidth(i.cafe, W()));
+            if (who) p.push(clipWidth(who, W()));
+        }
+
+        if (i.content) p.push(clipWidth(i.content, W()));
+        if (CONFIG.SHOW_SUBJECT && i.subject) p.push(clipWidth('— ' + i.subject, W()));
+        if (!p.length) p.push(clipWidth(i.text, W()));
         return p.join('\n');
     }
 
-    function shortOf(i) {
+    function mergedEntry(i) {
         const who = [i.cafe, i.author].filter(Boolean).join(' · ');
-        const what = truncate(i.content || i.text, 40);
-        return (who ? who + ' — ' : '') + what;
+        const header = clipWidth('[' + i.type.label + '] ' + who, W());
+        if (!i.content) return header;
+        const prefixW = CONFIG.CONTENT_PREFIX.length + 1;
+        return header + '\n' + CONFIG.CONTENT_PREFIX + clipWidth(i.content, W() - prefixW);
     }
 
     /* ============================================================
@@ -405,8 +429,9 @@
         if (!feed.length) return;
 
         if (CONFIG.MERGE_FEED_NOTIFICATIONS && feed.length > 1) {
-            const lines = feed.slice(0, 4).map((i) => '· [' + i.type.label + '] ' + shortOf(i));
-            if (feed.length > 4) lines.push('… 외 ' + (feed.length - 4) + '건');
+            const n = CONFIG.MERGE_MAX_ITEMS;
+            const lines = feed.slice(0, n).map(mergedEntry);
+            if (feed.length > n) lines.push('… 외 ' + (feed.length - n) + '건');
             enqueue('[네이버 카페] 새 소식 ' + feed.length + '건', lines.join('\n'), feed[0].href);
         } else {
             feed.slice().reverse().forEach((i) =>
@@ -419,7 +444,7 @@
     }
 
     /* ============================================================
-     * 8. 진단 — 원본 줄 구조를 그대로 출력한다
+     * 8. 진단
      * ========================================================== */
     function diagnose() {
         const out = [];
@@ -437,6 +462,7 @@
             out.push('  RAW줄: ' + JSON.stringify(f.lines));
             out.push('  카페=[' + f.cafe + '] 작성자=[' + f.author + '] 시간=[' + f.time + ']');
             out.push('  내용=[' + truncate(f.content, 50) + '] 전체댓글수=' + f.totalComments);
+            if (f.type) out.push('  알림미리보기:\n' + mergedEntry(f).split('\n').map(l => '    ' + l).join('\n'));
         });
 
         const text = out.join('\n');
