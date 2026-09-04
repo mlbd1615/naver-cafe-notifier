@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v4
+// @name         네이버 카페 '내 소식' 데스크톱 알리미 v5
 // @namespace    https://section.cafe.naver.com/
-// @version      4.0.0
-// @description  네이버 카페 '내 소식'(댓글/답글/좋아요)과 카페 채팅을 감지해 데스크톱 알림으로 띄웁니다.
+// @version      5.0.0
+// @description  네이버 카페 '내 소식'의 안 읽은 항목만 골라 종류별로 데스크톱 알림을 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
 // @icon         https://cafe.naver.com/favicon.ico
@@ -23,13 +23,22 @@
      * ========================================================== */
     const CONFIG = {
         RELOAD_INTERVAL_SEC: 60,
-        ENABLE_LIKE: false,
-        ENABLE_COMMENT: true,
-        ENABLE_CHAT: true,
 
+        /* 종류별 알림 ON/OFF */
+        ENABLE_LIKE_COMMENT: false, // "내 댓글을 N명이 좋아해요"
+        ENABLE_LIKE_POST: false,    // "OOO 님이 내 글을 좋아합니다"
+        ENABLE_COMMENT: true,       // "OOO 내 글의 댓글"
+        ENABLE_REPLY: true,         // "OOO 내 댓글의 답글"
+        ENABLE_CHAT: true,          // 좌측 사이드바 채팅 뱃지
+
+        /* 안 읽은 항목(은은한 초록 배경)만 알림 대상으로 삼는다.
+         * false로 두면 읽음 여부와 무관하게 새 항목 전부를 알린다. */
+        ONLY_UNREAD: true,
+
+        NOTIFY_ICON: '',            // 빈 문자열이면 알림에 큰 이미지가 안 붙는다
         DOM_READY_DELAY_MS: 3000,
         RESCAN_INTERVAL_SEC: 15,
-        MAX_FEED_ITEMS: 20,
+        MAX_FEED_ITEMS: 30,
         MAX_HISTORY: 50,
         NOTIFY_TAG: 'naver-cafe-group-notification',
         MERGE_FEED_NOTIFICATIONS: true,
@@ -43,20 +52,21 @@
 
     const PATH_RE = /\/ca-fe\/home\/my-news/;
 
+    /* 첫 줄(헤드라인) 기준으로 종류를 판정한다.
+     * 본문에 '댓글' 같은 단어가 섞여도 오분류되지 않게 하기 위함. */
+    const TYPES = [
+        { id: 'reply',        re: /내\s*(댓글|글)의\s*답글/,        label: '새 답글',      cfg: 'ENABLE_REPLY' },
+        { id: 'comment',      re: /내\s*(글|댓글)의\s*댓글/,        label: '새 댓글',      cfg: 'ENABLE_COMMENT' },
+        { id: 'like_comment', re: /좋아해요/,                       label: '내 댓글 좋아요', cfg: 'ENABLE_LIKE_COMMENT' },
+        { id: 'like_post',    re: /좋아합니다/,                     label: '내 글 좋아요',  cfg: 'ENABLE_LIKE_POST' }
+    ];
+
     const HINTS = {
-        RE_LIKE: /좋아해요|좋아합니다|좋아요/,
-        RE_COMMENT: /댓글|답글/,
-
-        /* 실제 소식 항목은 반드시 "8시간 전" / "어제" 같은 시간 표기를 갖는다.
-         * 팝오버 메뉴("이 카페 댓글알림 설정")에는 없으므로 이걸로 걸러낸다. */
+        RE_ANY: /좋아해요|좋아합니다|댓글|답글/,
         RE_TIME: /(\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2})/,
-
-        /* 피드에서 제외할 UI 조각 */
         JUNK_CLASS: /popover|pop_over|tooltip|layer|dropdown|modal|gnb_/i,
         JUNK_ANCESTOR: '[class*="popover" i], [class*="pop_over" i], [class*="tooltip" i], [class*="layer" i]',
-
-        /* 채팅에서 제외할 것 — 네이버톡(gnb_talk)은 카페 채팅이 아니다 */
-        CHAT_EXCLUDE: /talk|네이버톡|스마트봇|smartbot|mail|메일|쪽지/i
+        CHAT_EXCLUDE: /네이버톡|스마트봇|smartbot|mail|메일|쪽지/i
     };
 
     const KEY = { CHAT: 'ncn_chat_count', SEEN: 'ncn_seen_keys', INIT: 'ncn_initialized' };
@@ -101,7 +111,31 @@
     }
 
     /* ============================================================
-     * 3. 알림 발송
+     * 3. 읽음/안읽음 판정 — 배경색으로 본다
+     *    클래스명이 아니라 실제 렌더링 색을 보므로 네이버가 마크업을
+     *    바꿔도 초록 하이라이트만 유지되면 계속 동작한다.
+     * ========================================================== */
+    function parseRGB(s) {
+        const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:[,\s/]+([\d.]+))?/.exec(s || '');
+        if (!m) return null;
+        return { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] };
+    }
+
+    function unreadInfo(el) {
+        let node = el;
+        for (let i = 0; i < 4 && node && node !== document.body; i++, node = node.parentElement) {
+            let bg = '';
+            try { bg = getComputedStyle(node).backgroundColor; } catch (e) { continue; }
+            const c = parseRGB(bg);
+            if (!c || c.a < 0.05) continue;
+            if (Math.abs(c.r - c.g) <= 2 && Math.abs(c.g - c.b) <= 2) continue; // 흰색·회색은 읽음
+            if (c.g > c.r && c.g > c.b) return { unread: true, color: bg };      // 초록 우세 = 안 읽음
+        }
+        return { unread: false, color: '' };
+    }
+
+    /* ============================================================
+     * 4. 알림 발송
      * ========================================================== */
     const queue = [];
     let sending = false;
@@ -132,14 +166,15 @@
         const N = getNotificationCtor();
         if (N && N.permission === 'granted') {
             try {
-                const n = new N(title, {
+                const opts = {
                     body: body,
                     tag: CONFIG.NOTIFY_TAG,
                     renotify: true,
                     requireInteraction: CONFIG.REQUIRE_INTERACTION,
-                    silent: false,
-                    icon: 'https://cafe.naver.com/favicon.ico'
-                });
+                    silent: false
+                };
+                if (CONFIG.NOTIFY_ICON) opts.icon = CONFIG.NOTIFY_ICON;
+                const n = new N(title, opts);
                 n.onclick = () => { onClick(); n.close(); };
                 return;
             } catch (e) { log('Notification 실패 → 폴백', e); }
@@ -150,26 +185,22 @@
     }
 
     /* ============================================================
-     * 4. 채팅 감지 — 좌측 사이드바 '채팅' 메뉴 기준
-     *    네이버톡(gnb_talk)의 배지를 잡던 v3 버그를 수정
+     * 5. 채팅 감지
      * ========================================================== */
     function chatCandidates() {
         const found = new Set();
 
-        // 1) 이름이 정확히 '채팅'인 메뉴를 찾아 그 클릭 영역을 후보로
         document.querySelectorAll('span, em, a, li, button').forEach((el) => {
             const t = norm(el.textContent);
-            if (t !== '채팅' && !/^채팅\s*\d{1,3}\+?$/.test(t)) return;
+            if (!/^채팅/.test(t) || t.length > 20) return;
             const holder = el.closest('a, li, button') || el.parentElement;
             if (holder) found.add(holder);
         });
-
-        // 2) 클래스나 링크에 chat이 명시된 요소
         document.querySelectorAll('[class*="chat" i], a[href*="/chat"]').forEach((el) => found.add(el));
 
         return Array.from(found).filter((el) => {
-            const sig = cls(el) + ' ' + (el.getAttribute('aria-label') || '') +
-                        ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('href') || '');
+            const sig = cls(el) + ' ' + (el.textContent || '') + ' ' +
+                        (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('href') || '');
             return !HINTS.CHAT_EXCLUDE.test(sig);
         });
     }
@@ -180,7 +211,6 @@
 
         let max = 0;
         cands.forEach((holder) => {
-            // 부모로 올라가지 않는다 — 옆 메뉴(네이버톡)의 배지를 주워오지 않기 위해
             [holder].concat(Array.from(holder.querySelectorAll('em, span, i, b, strong'))).forEach((node) => {
                 const t = norm(node.textContent);
                 if (!t || t.length > 4) return;
@@ -193,7 +223,7 @@
     }
 
     /* ============================================================
-     * 5. 피드 감지 — 시간 표기가 있는 항목만 인정
+     * 6. 피드 감지
      * ========================================================== */
     function collectFeedItems() {
         const picked = [];
@@ -202,36 +232,47 @@
             if (HINTS.JUNK_CLASS.test(cls(el))) return;
             if (el.closest(HINTS.JUNK_ANCESTOR)) return;
 
-            const text = norm(el.innerText || '');
+            const raw = el.innerText || '';
+            const text = norm(raw);
             if (text.length < 10 || text.length > 500) return;
-            if (!HINTS.RE_LIKE.test(text) && !HINTS.RE_COMMENT.test(text)) return;
-            if (!HINTS.RE_TIME.test(text)) return;   // ← 팝오버 메뉴를 걸러내는 핵심 조건
+            if (!HINTS.RE_ANY.test(text)) return;
+            if (!HINTS.RE_TIME.test(text)) return;
             if (!isVisible(el)) return;
 
-            picked.push({ el, text });
+            picked.push({ el, raw, text });
         });
 
         const leaves = picked.filter((p) => !picked.some((q) => q.el !== p.el && p.el.contains(q.el)));
         return leaves.slice(0, CONFIG.MAX_FEED_ITEMS);
     }
 
-    function buildItem({ el, text }) {
+    function buildItem({ el, raw, text }) {
+        const lines = raw.split('\n').map(norm).filter(Boolean);
+        const head = lines[0] || text;
+
+        // 헤드라인으로 먼저 판정하고, 실패하면 전체 텍스트로 한 번 더
+        let type = null;
+        for (const t of TYPES) { if (t.re.test(head)) { type = t; break; } }
+        if (!type) { for (const t of TYPES) { if (t.re.test(text)) { type = t; break; } } }
+
         const link = el.querySelector('a[href]');
         const href = link ? link.href : '';
         const key = (href ? href.split('?')[0] : 'nolink') + '::' + hashText(text);
-        let type = null;
-        if (HINTS.RE_LIKE.test(text)) type = 'like';
-        else if (HINTS.RE_COMMENT.test(text)) type = 'comment';
-        return { key, type, text, href, el };
+        const ur = unreadInfo(el);
+
+        return { key, type, head, lines, text, href, el, unread: ur.unread, color: ur.color };
     }
 
-    const titleOf = (i) => (i.type === 'like' ? '[네이버 카페] 좋아요' : '[네이버 카페] 새 댓글');
-    const bodyOf = (i) => truncate(i.text, 150);
+    function bodyOf(item) {
+        const parts = [truncate(item.head, 80)];
+        if (item.lines[1]) parts.push(truncate(item.lines[1], 80));
+        return parts.join('\n');
+    }
 
     /* ============================================================
-     * 6. 메인 스캔
+     * 7. 메인 스캔
      * ========================================================== */
-    let lastStat = { chat: null, feed: 0, scanned: false };
+    let lastStat = { chat: null, unread: 0, total: 0, scanned: false };
 
     function scan() {
         const initialized = store.get(KEY.INIT, false);
@@ -248,9 +289,14 @@
         }
 
         const items = collectFeedItems().map(buildItem).filter((i) => i.type);
-        lastStat.feed = items.length;
+        const unreadItems = items.filter((i) => i.unread);
+
+        lastStat.total = items.length;
+        lastStat.unread = unreadItems.length;
         lastStat.scanned = true;
-        const allKeys = items.map((i) => i.key);
+
+        const targets = CONFIG.ONLY_UNREAD ? unreadItems : items;
+        const allKeys = items.map((i) => i.key); // 읽음 여부와 무관하게 전부 기록
 
         if (!initialized) {
             saveSeen(allKeys);
@@ -261,11 +307,10 @@
         }
 
         const seenSet = new Set(loadSeen());
-        for (const it of items) {
+        for (const it of targets) {
             if (seenSet.has(it.key)) continue;
-            if (it.type === 'like' && !CONFIG.ENABLE_LIKE) continue;
-            if (it.type === 'comment' && !CONFIG.ENABLE_COMMENT) continue;
-            events.push({ kind: it.type, item: it });
+            if (!CONFIG[it.type.cfg]) continue; // 종류별 스위치
+            events.push({ kind: 'feed', item: it });
         }
 
         saveSeen(allKeys.concat(loadSeen()));
@@ -280,15 +325,16 @@
             enqueue('[네이버 카페] 채팅 알림', '새로운 채팅 메시지가 도착했습니다.');
         }
 
-        const feed = events.filter((e) => e.kind !== 'chat').map((e) => e.item);
+        const feed = events.filter((e) => e.kind === 'feed').map((e) => e.item);
         if (!feed.length) return;
 
         if (CONFIG.MERGE_FEED_NOTIFICATIONS && feed.length > 1) {
-            const lines = feed.slice(0, 5).map((i) => '· ' + truncate(bodyOf(i), 60));
+            const lines = feed.slice(0, 5).map((i) => '· [' + i.type.label + '] ' + truncate(i.head, 50));
             if (feed.length > 5) lines.push('… 외 ' + (feed.length - 5) + '건');
             enqueue('[네이버 카페] 새 소식 ' + feed.length + '건', lines.join('\n'), feed[0].href);
         } else {
-            feed.slice().reverse().forEach((i) => enqueue(titleOf(i), bodyOf(i), i.href));
+            feed.slice().reverse().forEach((i) =>
+                enqueue('[네이버 카페] ' + i.type.label, bodyOf(i), i.href));
         }
     }
 
@@ -297,30 +343,29 @@
     }
 
     /* ============================================================
-     * 7. 진단
+     * 8. 진단
      * ========================================================== */
     function diagnose() {
         const out = [];
-        out.push('=== 카페 알리미 v4 진단 ===');
-        out.push('URL : ' + location.href);
+        out.push('=== 카페 알리미 v5 진단 ===');
         const N = getNotificationCtor();
         out.push('권한: ' + (N ? N.permission : '없음') + ' / 감시: ' + (running ? '동작' : '정지'));
 
-        out.push('\n--- 채팅 후보 (네이버톡 제외) ---');
+        out.push('\n--- 채팅 ---');
         const cands = chatCandidates();
-        out.push('총 ' + cands.length + '개');
-        cands.slice(0, 10).forEach((el, i) => {
-            out.push(`[${i}] <${el.tagName.toLowerCase()} class="${cls(el)}"> "${truncate(el.textContent, 30)}"`);
-        });
-        out.push('→ 파싱된 채팅 수: ' + detectChatCount());
+        cands.slice(0, 8).forEach((el, i) =>
+            out.push(`[${i}] <${el.tagName.toLowerCase()} class="${cls(el)}"> "${truncate(el.textContent, 30)}"`));
+        out.push('→ 채팅 수: ' + detectChatCount());
 
         out.push('\n--- 피드 ---');
-        const feed = collectFeedItems().map(buildItem);
-        out.push('총 ' + feed.length + '개 (like:' + feed.filter(f => f.type === 'like').length +
-                 ' / comment:' + feed.filter(f => f.type === 'comment').length + ')');
-        feed.slice(0, 8).forEach((f, i) => {
-            out.push(`[${i}] (${f.type}) class="${cls(f.el)}"`);
-            out.push('     ' + truncate(f.text, 90));
+        const items = collectFeedItems().map(buildItem);
+        const byType = {};
+        items.forEach((i) => { const k = i.type ? i.type.id : 'unknown'; byType[k] = (byType[k] || 0) + 1; });
+        out.push('총 ' + items.length + '건 / 안읽음 ' + items.filter(i => i.unread).length + '건');
+        out.push('종류별: ' + JSON.stringify(byType));
+        items.slice(0, 10).forEach((f, i) => {
+            out.push(`[${i}] ${f.unread ? '● 안읽음' : '○ 읽음'} (${f.type ? f.type.id : 'unknown'}) bg=${f.color || '-'}`);
+            out.push('     ' + truncate(f.head, 70));
         });
 
         const text = out.join('\n');
@@ -334,12 +379,12 @@
         store.set(KEY.INIT, false);
         store.set(KEY.SEEN, '[]');
         store.set(KEY.CHAT, 0);
-        lastStat = { chat: null, feed: 0, scanned: false };
-        toast('초기화 완료. 다음 스캔에서 현재 목록을 다시 등록합니다.');
+        lastStat = { chat: null, unread: 0, total: 0, scanned: false };
+        toast('초기화 완료');
     }
 
     /* ============================================================
-     * 8. UI
+     * 9. UI
      * ========================================================== */
     let panel = null, panelInfo = null;
 
@@ -375,7 +420,7 @@
             'font:12px/1.5 sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35)';
 
         const head = document.createElement('div');
-        head.textContent = '🔔 카페 알리미 v4';
+        head.textContent = '🔔 카페 알리미 v5';
         head.style.cssText = 'font-weight:700;color:#03c75a;margin-bottom:4px';
 
         panelInfo = document.createElement('div');
@@ -401,8 +446,8 @@
         if (!lastStat.scanned) {
             line2 = '첫 스캔 대기 중…';
         } else {
-            const chat = lastStat.chat === null ? '감지실패' : lastStat.chat + '건';
-            line2 = '채팅: ' + chat + ' · 피드: ' + lastStat.feed + '건';
+            const chat = lastStat.chat === null ? '감지실패' : lastStat.chat;
+            line2 = '안읽음 ' + lastStat.unread + ' / 전체 ' + lastStat.total + ' · 채팅 ' + chat;
         }
         panelInfo.textContent =
             '권한: ' + (N ? N.permission : 'N/A') + '\n' + line2 + '\n' +
@@ -410,7 +455,7 @@
     }
 
     /* ============================================================
-     * 9. 루프 / 라우팅
+     * 10. 루프 / 라우팅
      * ========================================================== */
     let running = false;
     let scanTimer = null, rescanTimer = null, tickTimer = null;
@@ -493,9 +538,9 @@
     })();
 
     /* ============================================================
-     * 10. 시작
+     * 11. 시작
      * ========================================================== */
-    console.log('%c[카페알리미 v4] 로드됨', 'background:#03c75a;color:#fff;padding:2px 6px', location.href);
+    console.log('%c[카페알리미 v5] 로드됨', 'background:#03c75a;color:#fff;padding:2px 6px', location.href);
 
     mountPanel();
     setInterval(mountPanel, 1000);
@@ -507,6 +552,6 @@
     window.addEventListener('load', () => setTimeout(boot, 500));
 
     try {
-        unsafeWindow.__cafeNotifier = { diagnose, reset, scan: safeScan, CONFIG, HINTS, start, stop };
+        unsafeWindow.__cafeNotifier = { diagnose, reset, scan: safeScan, CONFIG, TYPES, start, stop };
     } catch (e) { log('unsafeWindow 노출 실패', e); }
 })();
