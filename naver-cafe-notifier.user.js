@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v2
+// @name         네이버 카페 '내 소식' 데스크톱 알리미 v3
 // @namespace    https://section.cafe.naver.com/
-// @version      2.0.0
-// @description  네이버 카페 '내 소식'(댓글/답글/좋아해요)과 1:1 채팅을 감지해 데스크톱 알림으로 띄웁니다. SPA 라우팅 대응 + 진단 패널 포함.
+// @version      3.0.0
+// @description  네이버 카페 '내 소식'(댓글/답글/좋아요)과 채팅을 감지해 데스크톱 알림으로 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
 // @icon         https://cafe.naver.com/favicon.ico
@@ -11,7 +11,7 @@
 // @grant        GM_notification
 // @grant        window.focus
 // @grant        unsafeWindow
-// @run-at       document-idle
+// @run-at       document-start
 // @noframes
 // ==/UserScript==
 
@@ -37,23 +37,25 @@
         REQUIRE_INTERACTION: false,
         OPEN_LINK_ON_CLICK: false,
         NOTIFY_STAGGER_MS: 700,
-        REFRESH_TIMESTAMP: true,  // 새로고침 시 ?t= 값을 현재 시각으로 갱신 (캐시 회피)
-        SHOW_PANEL: true,         // 우측 하단 상태/진단 패널
+        REFRESH_TIMESTAMP: true,
+        SHOW_PANEL: true,
         DEBUG: false
     };
 
-    /* '내 소식' 페이지 판별 — cafe-activity 등 하위 탭 전부 포함 */
     const PATH_RE = /\/ca-fe\/home\/my-news/;
 
-    /* 선택자 / 키워드 후보 — DOM이 바뀌면 여기만 수정 */
+    /* 실제 화면 문구 기준으로 수정한 패턴
+     *   좋아요 : "내 댓글을 1명이 좋아해요." / "OOO 님이 내 글을 좋아합니다."
+     *   댓글   : "OOO 내 글의 댓글" / "OOO 내 댓글의 답글"
+     * "내 댓글을 N명이 좋아해요"는 두 단어를 모두 포함하므로 좋아요를 먼저 판정한다. */
     const HINTS = {
-        SCOPE: ['header', '[class*="Gnb" i]', '[id*="gnb" i]', '[class*="Header" i]'],
-        CHAT: ['[class*="chat" i]', '[class*="talk" i]', 'a[href*="chat"]', 'a[href*="talk"]'],
+        NAV_SCOPE: 'header, nav, aside, [class*="gnb" i], [class*="nav" i], [class*="side" i]',
+        CHAT_CLASS: '[class*="chat" i], [class*="talk" i], a[href*="chat"], a[href*="talk"]',
         FEED_ROOT: ['main', '[class*="MyNews" i]', '[class*="my_news" i]', '[class*="activity" i]', '#content', '.content'],
         FEED_ITEM: 'li, article, [class*="item" i]',
         AUTHOR: '[class*="nick" i], [class*="writer" i], [class*="name" i], [class*="user" i], strong',
         CONTENT: '[class*="comment" i], [class*="content" i], [class*="desc" i], [class*="text" i], p',
-        RE_LIKE: /좋아해요/,
+        RE_LIKE: /좋아해요|좋아합니다|좋아요/,
         RE_COMMENT: /댓글|답글/
     };
 
@@ -110,7 +112,6 @@
         setTimeout(() => { sending = false; drain(); }, CONFIG.NOTIFY_STAGGER_MS);
     }
 
-    /* 샌드박스 문제 대비: 여러 경로로 Notification 생성자 확보 */
     function getNotificationCtor() {
         try { if (typeof Notification !== 'undefined') return Notification; } catch (e) {}
         try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow.Notification) return unsafeWindow.Notification; } catch (e) {}
@@ -135,49 +136,54 @@
                     icon: 'https://cafe.naver.com/favicon.ico'
                 });
                 n.onclick = () => { onClick(); n.close(); };
-                log('알림 발송(Notification)', title);
+                log('알림 발송', title);
                 return;
-            } catch (e) {
-                log('Notification 실패 → GM_notification 폴백', e);
-            }
+            } catch (e) { log('Notification 실패 → GM_notification 폴백', e); }
         }
 
         try {
             GM_notification({ title: title, text: body, tag: CONFIG.NOTIFY_TAG, onclick: onClick });
-            log('알림 발송(GM_notification)', title);
-        } catch (e) {
-            console.error('[카페알리미] 알림 발송 실패', e);
-        }
+        } catch (e) { console.error('[카페알리미] 알림 발송 실패', e); }
     }
 
     /* ============================================================
      * 4. 채팅 뱃지 감지
+     *    상단 GNB의 말풍선 아이콘과 좌측 사이드바의 '채팅' 메뉴 양쪽을 본다.
      * ========================================================== */
-    function findScope() {
-        for (const sel of HINTS.SCOPE) {
-            const el = document.querySelector(sel);
-            if (el) return el;
-        }
-        return document;
+    function chatCandidates() {
+        const found = new Set();
+
+        document.querySelectorAll(HINTS.CHAT_CLASS).forEach((el) => found.add(el));
+
+        // 네비게이션 영역 안에서 '채팅' 텍스트나 라벨을 가진 요소
+        document.querySelectorAll(HINTS.NAV_SCOPE).forEach((scope) => {
+            scope.querySelectorAll('a, button, li, span').forEach((el) => {
+                const label = (el.getAttribute('aria-label') || el.getAttribute('title') || '');
+                const t = norm(el.textContent);
+                if (/채팅/.test(label) || t === '채팅' || /^채팅\s*\d{1,3}\+?$/.test(t)) found.add(el);
+            });
+        });
+
+        return Array.from(found);
     }
 
     function detectChatCount() {
-        const selector = HINTS.CHAT.join(',');
-        let chatEls = Array.from(findScope().querySelectorAll(selector));
-        if (!chatEls.length) chatEls = Array.from(document.querySelectorAll(selector));
-        if (!chatEls.length) return null;
+        const cands = chatCandidates();
+        if (!cands.length) return null;
 
         let max = 0;
-        for (const el of chatEls) {
-            const nodes = [el].concat(Array.from(el.querySelectorAll('em, span, i, b, strong, div')));
-            for (const node of nodes) {
-                const t = norm(node.textContent);
-                if (!t || t.length > 4) continue;
-                if (!/^\d{1,3}\+?$/.test(t)) continue;
-                const n = parseInt(t, 10);
-                if (!isNaN(n) && n > max) max = n;
-            }
-        }
+        cands.forEach((el) => {
+            // 뱃지가 형제로 붙는 경우가 있어 부모까지 훑는다
+            [el, el.parentElement].filter(Boolean).forEach((scope) => {
+                [scope].concat(Array.from(scope.querySelectorAll('em, span, i, b, strong, div'))).forEach((node) => {
+                    const t = norm(node.textContent);
+                    if (!t || t.length > 4) return;
+                    if (!/^\d{1,3}\+?$/.test(t)) return;
+                    const n = parseInt(t, 10);
+                    if (!isNaN(n) && n > max) max = n;
+                });
+            });
+        });
         return max;
     }
 
@@ -189,7 +195,7 @@
             const el = document.querySelector(sel);
             if (el && norm(el.innerText).length > 30) return el;
         }
-        return document.body;
+        return document.body || document.documentElement;
     }
 
     function collectFeedItems() {
@@ -224,7 +230,7 @@
         return { author: pick(HINTS.AUTHOR), content: pick(HINTS.CONTENT) };
     }
 
-    const titleOf = (i) => (i.type === 'like' ? '[네이버 카페] 좋아해요' : '[네이버 카페] 새 댓글');
+    const titleOf = (i) => (i.type === 'like' ? '[네이버 카페] 좋아요' : '[네이버 카페] 새 댓글');
 
     function bodyOf(item) {
         if (item.type === 'comment') {
@@ -267,8 +273,7 @@
             return;
         }
 
-        const seen = loadSeen();
-        const seenSet = new Set(seen);
+        const seenSet = new Set(loadSeen());
         for (const it of items) {
             if (seenSet.has(it.key)) continue;
             if (it.type === 'like' && !CONFIG.ENABLE_LIKE) continue;
@@ -276,7 +281,7 @@
             events.push({ kind: it.type, item: it });
         }
 
-        saveSeen(allKeys.concat(seen));
+        saveSeen(allKeys.concat(loadSeen()));
         dispatch(events);
         paint();
     }
@@ -309,55 +314,37 @@
      * ========================================================== */
     function diagnose() {
         const out = [];
-        out.push('=== 네이버 카페 알리미 진단 ===');
-        out.push('URL       : ' + location.href);
-        out.push('대상 페이지: ' + PATH_RE.test(location.pathname));
+        out.push('=== 카페 알리미 v3 진단 ===');
+        out.push('URL : ' + location.href);
         const N = getNotificationCtor();
-        out.push('알림 권한 : ' + (N ? N.permission : 'Notification 사용 불가'));
-        out.push('감시 상태 : ' + (running ? '동작 중' : '정지'));
+        out.push('권한: ' + (N ? N.permission : '없음') + ' / 감시: ' + (running ? '동작' : '정지'));
 
-        out.push('\n--- 채팅 아이콘 후보 (' + HINTS.CHAT.join(', ') + ') ---');
-        const chatEls = Array.from(document.querySelectorAll(HINTS.CHAT.join(',')));
-        out.push('총 ' + chatEls.length + '개');
-        chatEls.slice(0, 15).forEach((el, i) => {
-            out.push(`[${i}] <${el.tagName.toLowerCase()} class="${cls(el)}"> "${truncate(el.innerText, 40)}"`);
+        out.push('\n--- 채팅 후보 ---');
+        const cands = chatCandidates();
+        out.push('총 ' + cands.length + '개');
+        cands.slice(0, 12).forEach((el, i) => {
+            out.push(`[${i}] <${el.tagName.toLowerCase()} class="${cls(el)}"> "${truncate(el.textContent, 30)}"`);
         });
-        out.push('→ 파싱된 채팅 카운트: ' + detectChatCount());
+        out.push('→ 파싱된 카운트: ' + detectChatCount());
 
-        out.push('\n--- 피드 루트 ---');
+        out.push('\n--- 피드 ---');
         const root = findFeedRoot();
-        out.push(`<${root.tagName.toLowerCase()} class="${cls(root)}">`);
-
-        out.push('\n--- 피드 항목 후보 ---');
-        const feed = collectFeedItems();
-        out.push('총 ' + feed.length + '개');
-        feed.slice(0, 5).forEach((f, i) => {
-            out.push(`[${i}] <${f.el.tagName.toLowerCase()} class="${cls(f.el)}">`);
-            out.push('    text: ' + truncate(f.text, 120));
-        });
+        out.push(`루트 <${root.tagName.toLowerCase()} class="${cls(root)}">`);
+        const feed = collectFeedItems().map(buildItem);
+        out.push('총 ' + feed.length + '개 (like:' + feed.filter(f => f.type === 'like').length +
+                 ' / comment:' + feed.filter(f => f.type === 'comment').length +
+                 ' / 미분류:' + feed.filter(f => !f.type).length + ')');
+        feed.slice(0, 6).forEach((f, i) => out.push(`[${i}] (${f.type}) ${truncate(f.text, 90)}`));
 
         if (feed.length) {
-            out.push('\n--- 첫 항목 HTML (앞 800자) ---');
-            out.push(feed[0].el.outerHTML.slice(0, 800));
-        } else {
-            out.push('\n--- 피드 미검출: "좋아해요/댓글/답글" 텍스트가 있는 노드 샘플 ---');
-            const raw = Array.from(document.querySelectorAll('li, article, div'))
-                .filter((el) => {
-                    const t = norm(el.innerText || '');
-                    return t.length > 5 && t.length < 300 && (HINTS.RE_LIKE.test(t) || HINTS.RE_COMMENT.test(t));
-                }).slice(0, 5);
-            out.push('총 ' + raw.length + '개');
-            raw.forEach((el, i) => out.push(`[${i}] <${el.tagName.toLowerCase()} class="${cls(el)}"> "${truncate(el.innerText, 80)}"`));
+            out.push('\n--- 첫 항목 HTML (앞 700자) ---');
+            out.push(feed[0].el.outerHTML.slice(0, 700));
         }
 
         const text = out.join('\n');
         console.log(text);
-        try {
-            navigator.clipboard.writeText(text);
-            toast('진단 결과를 콘솔에 출력하고 클립보드에 복사했습니다.');
-        } catch (e) {
-            toast('진단 결과를 콘솔(F12)에 출력했습니다.');
-        }
+        try { navigator.clipboard.writeText(text); toast('진단 결과 복사 완료'); }
+        catch (e) { toast('진단 결과를 콘솔에 출력했습니다'); }
         return text;
     }
 
@@ -365,20 +352,23 @@
         store.set(KEY.INIT, false);
         store.set(KEY.SEEN, '[]');
         store.set(KEY.CHAT, 0);
-        toast('저장된 상태를 초기화했습니다.');
+        toast('저장 상태를 초기화했습니다');
     }
 
     /* ============================================================
-     * 8. UI 패널
+     * 8. UI — documentElement에 부착하고 1초마다 생존 확인
+     *    (SPA가 body를 다시 그려도 살아남게 하는 핵심 변경점)
      * ========================================================== */
-    let panel, panelInfo;
+    let panel = null, panelInfo = null;
 
     function toast(msg) {
+        const host = document.documentElement;
+        if (!host) return;
         const t = document.createElement('div');
         t.textContent = msg;
-        t.style.cssText = 'position:fixed;right:16px;bottom:130px;z-index:2147483647;padding:10px 14px;' +
-            'border-radius:8px;background:rgba(0,0,0,.85);color:#fff;font:12px/1.4 "Malgun Gothic",sans-serif;max-width:280px';
-        document.body.appendChild(t);
+        t.style.cssText = 'position:fixed;right:16px;bottom:140px;z-index:2147483647;padding:10px 14px;' +
+            'border-radius:8px;background:rgba(0,0,0,.85);color:#fff;font:12px/1.4 sans-serif;max-width:280px';
+        host.appendChild(t);
         setTimeout(() => t.remove(), 4000);
     }
 
@@ -386,20 +376,24 @@
         const b = document.createElement('button');
         b.textContent = label;
         b.style.cssText = 'flex:1;padding:5px 0;border:0;border-radius:5px;cursor:pointer;' +
-            'background:rgba(255,255,255,.18);color:#fff;font:11px "Malgun Gothic",sans-serif';
+            'background:rgba(255,255,255,.18);color:#fff;font:11px sans-serif';
         b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
         return b;
     }
 
-    function buildPanel() {
-        if (panel || !CONFIG.SHOW_PANEL) return;
+    function mountPanel() {
+        if (!CONFIG.SHOW_PANEL) return;
+        const host = document.documentElement;
+        if (!host) return;
+        if (panel && host.contains(panel)) return; // 살아있으면 그대로
+
         panel = document.createElement('div');
         panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:210px;' +
-            'padding:10px 12px;border-radius:10px;background:rgba(20,22,26,.88);color:#fff;' +
-            'font:12px/1.5 "Malgun Gothic",-apple-system,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35)';
+            'padding:10px 12px;border-radius:10px;background:rgba(20,22,26,.9);color:#fff;' +
+            'font:12px/1.5 sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35)';
 
         const head = document.createElement('div');
-        head.textContent = '🔔 카페 알리미';
+        head.textContent = '🔔 카페 알리미 v3';
         head.style.cssText = 'font-weight:700;color:#03c75a;margin-bottom:4px';
 
         panelInfo = document.createElement('div');
@@ -407,22 +401,23 @@
 
         const row = document.createElement('div');
         row.style.cssText = 'display:flex;gap:5px;margin-top:8px';
-        row.appendChild(mkBtn('테스트', () => enqueue('[네이버 카페] 테스트 알림', '알림이 정상적으로 동작합니다.')));
+        row.appendChild(mkBtn('테스트', () => enqueue('[네이버 카페] 테스트 알림', '알림이 정상 동작합니다.')));
         row.appendChild(mkBtn('진단', diagnose));
         row.appendChild(mkBtn('초기화', reset));
 
         panel.append(head, panelInfo, row);
-        document.body.appendChild(panel);
+        panel.addEventListener('click', requestPermission);
+        host.appendChild(panel);
+        paint();
     }
 
     let secLeft = 0;
     function paint() {
         if (!panelInfo) return;
         const N = getNotificationCtor();
-        const perm = N ? N.permission : 'N/A';
         const chat = lastStat.chat === null ? '감지실패' : lastStat.chat + '건';
         panelInfo.textContent =
-            '권한: ' + perm + '\n' +
+            '권한: ' + (N ? N.permission : 'N/A') + '\n' +
             '채팅: ' + chat + ' · 피드: ' + lastStat.feed + '건\n' +
             (running ? '새로고침 ' + secLeft + '초 전' : '대기 중');
     }
@@ -450,7 +445,6 @@
         running = true;
         const interval = Math.max(15, CONFIG.RELOAD_INTERVAL_SEC);
         secLeft = interval;
-        log('감시 시작', location.href);
 
         scanTimer = setTimeout(() => {
             safeScan();
@@ -489,23 +483,20 @@
 
     function requestPermission() {
         const N = getNotificationCtor();
-        if (!N) { toast('이 브라우저는 알림을 지원하지 않습니다.'); return; }
-
+        if (!N) { toast('이 브라우저는 알림을 지원하지 않습니다'); return; }
+        if (N.permission === 'granted') { ensureState(); return; }
         if (N.permission === 'denied') {
-            toast('알림이 차단되어 있습니다.\n일반 탭에서 주소창 자물쇠 → 알림 → 허용 후 다시 여세요.');
+            toast('알림이 차단됨.\n주소창 자물쇠 → 알림 → 허용');
             paint();
             return;
         }
         N.requestPermission().then((p) => {
             paint();
             if (p === 'granted') ensureState();
-            else toast('알림 권한이 아직 없습니다.\n일반 탭에서 이 페이지를 열고 허용해 주세요.');
-        }).catch(() => {
-            toast('권한 요청 실패. 패널을 클릭해 다시 시도하세요.');
-        });
+            else toast('패널을 클릭해 알림을 허용해 주세요');
+        }).catch(() => toast('권한 요청 실패. 패널을 다시 클릭해 주세요'));
     }
 
-    /* SPA 라우팅 감지 */
     (function hookHistory() {
         ['pushState', 'replaceState'].forEach((m) => {
             const orig = history[m];
@@ -522,10 +513,18 @@
     /* ============================================================
      * 10. 시작
      * ========================================================== */
-    buildPanel();
-    if (panel) panel.addEventListener('click', requestPermission); // 패널 클릭 = 권한 재요청
-    paint();
-    ensureState();
+    console.log('%c[카페알리미 v3] 로드됨', 'background:#03c75a;color:#fff;padding:2px 6px', location.href);
+
+    mountPanel();
+    setInterval(mountPanel, 1000); // 패널이 지워지면 다시 붙임
+
+    function boot() { mountPanel(); ensureState(); }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', boot, { once: true });
+    } else {
+        boot();
+    }
+    window.addEventListener('load', () => setTimeout(boot, 500));
 
     try {
         unsafeWindow.__cafeNotifier = { diagnose, reset, scan: safeScan, CONFIG, HINTS, start, stop };
