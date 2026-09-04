@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v12
+// @name         네이버 카페 '내 소식' 데스크톱 알리미 v13
 // @namespace    https://section.cafe.naver.com/
-// @version      12.0.0
+// @version      13.0.0
 // @description  네이버 카페 '내 소식'의 안 읽은 댓글·답글·채팅을 하나의 알림으로 모아 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
@@ -19,37 +19,39 @@
 (function () {
     'use strict';
 
-    const VERSION = 'v12';
+    const VERSION = 'v13';
 
     /* ============================================================
      * 1. 설정
      * ========================================================== */
     const CONFIG = {
-        RELOAD_INTERVAL_SEC: 30,   // 15초 밑으로는 페이지 로딩 시간과 겹쳐 권장하지 않음
+        RELOAD_INTERVAL_SEC: 30,
 
         ENABLE_REPLY: true,
         ENABLE_COMMENT: true,
         ENABLE_LIKE_COMMENT: false,
         ENABLE_LIKE_POST: false,
 
-        /* 채팅
-         * 좌측 사이드바 뱃지는 네이버가 몇 분 늦게 갱신한다.
-         * 더 빠른 감지가 필요하면 채팅 창을 띄우고 ON_TALK을 켜되,
-         * 두 개를 동시에 켜면 같은 메시지로 두 번 알릴 수 있으니 하나만 쓸 것. */
         ENABLE_CHAT_ON_NEWS: true,
-        ENABLE_CHAT_ON_TALK: false,
+        ENABLE_CHAT_ON_TALK: false,   // 둘 중 하나만 켤 것 (동시에 켜면 중복 알림)
         TALK_SCAN_INTERVAL_SEC: 10,
 
         ONLY_UNREAD: true,
         SHOW_SUBJECT: false,
 
         /* --- 알림 방식 ---
-         * 'summary' : 안 읽은 것을 전부 하나의 알림에 모아 계속 갱신 (카톡 방식)
-         *             알림 센터에 항상 1건만 있고 펼칠 필요가 없다.
-         * 'each'    : 새 항목이 생길 때마다 개별 알림을 쌓는다. */
+         * 'summary' : 안 읽은 것을 하나의 알림에 모아 계속 갱신 (카톡 방식)
+         * 'each'    : 새 항목마다 개별 알림 */
         NOTIFY_MODE: 'summary',
+
+        /* 여러 건일 때 목록 스타일
+         *  'compact' : 한 항목 = 한 줄  → 윈도우가 자르기 전에 4건 정도 보인다
+         *  'detail'  : 한 항목 = 두 줄  → 읽기 편하지만 2건까지만 보인다
+         * 윈도우가 알림 본문을 4줄 안팎에서 잘라내는 건 코드로 못 바꾼다. */
+        LIST_STYLE: 'compact',
+        MERGE_MAX_ITEMS: 5,
+
         NOTIFY_LINE_WIDTH: 52,
-        MERGE_MAX_ITEMS: 3,
         CONTENT_PREFIX: '└ ',
 
         NOTIFY_ICON: '',
@@ -71,10 +73,10 @@
     const IS_TALK = /talk\.cafe\.naver\.com$/.test(location.hostname);
 
     const TYPES = [
-        { id: 'reply',        re: /내\s*(댓글|글)의\s*답글/, label: '새 답글',        short: '답글',   cfg: 'ENABLE_REPLY' },
-        { id: 'comment',      re: /내\s*(글|댓글)의\s*댓글/, label: '새 댓글',        short: '댓글',   cfg: 'ENABLE_COMMENT' },
-        { id: 'like_comment', re: /좋아해요/,                label: '내 댓글 좋아요', short: '댓글♡', cfg: 'ENABLE_LIKE_COMMENT' },
-        { id: 'like_post',    re: /좋아합니다/,              label: '내 글 좋아요',   short: '글♡',   cfg: 'ENABLE_LIKE_POST' }
+        { id: 'reply',        re: /내\s*(댓글|글)의\s*답글/, label: '새 답글',        tag: '답글',   short: '답글',   cfg: 'ENABLE_REPLY' },
+        { id: 'comment',      re: /내\s*(글|댓글)의\s*댓글/, label: '새 댓글',        tag: '댓글',   short: '댓글',   cfg: 'ENABLE_COMMENT' },
+        { id: 'like_comment', re: /좋아해요/,                label: '내 댓글 좋아요', tag: '댓글♡', short: '댓글♡', cfg: 'ENABLE_LIKE_COMMENT' },
+        { id: 'like_post',    re: /좋아합니다/,              label: '내 글 좋아요',   tag: '글♡',   short: '글♡',   cfg: 'ENABLE_LIKE_POST' }
     ];
 
     const HINTS = {
@@ -180,20 +182,14 @@
             try { window.focus(); } catch (e) { log('focus 실패', e); }
             if (CONFIG.OPEN_LINK_ON_CLICK && url) window.open(url, '_blank');
         };
-
-        /* 요약 모드는 고정 tag를 써서 이전 알림을 갱신(대체)한다.
-         * 개별 모드는 매번 다른 tag를 줘서 쌓이게 한다. */
         const useTag = tag || (CONFIG.BASE_TAG + '-' + Date.now() + '-' + (tagSeq++));
 
         const N = getNotificationCtor();
         if (N && N.permission === 'granted') {
             try {
                 const opts = {
-                    body: body,
-                    tag: useTag,
-                    renotify: true,      // 같은 tag여도 다시 소리·팝업이 뜨게 한다
-                    requireInteraction: CONFIG.REQUIRE_INTERACTION,
-                    silent: false
+                    body: body, tag: useTag, renotify: true,
+                    requireInteraction: CONFIG.REQUIRE_INTERACTION, silent: false
                 };
                 if (CONFIG.NOTIFY_ICON) opts.icon = CONFIG.NOTIFY_ICON;
                 const n = new N(title, opts);
@@ -223,7 +219,7 @@
         return total;
     }
 
-    function newsChatCandidates() {
+    function newsChatCount() {
         const found = new Set();
         document.querySelectorAll('span, em, a, li, button').forEach((el) => {
             const t = norm(el.textContent);
@@ -232,15 +228,13 @@
             if (holder) found.add(holder);
         });
         document.querySelectorAll('[class*="chat" i], a[href*="/chat"]').forEach((el) => found.add(el));
-        return Array.from(found).filter((el) => {
+
+        const cands = Array.from(found).filter((el) => {
             const sig = cls(el) + ' ' + (el.textContent || '') + ' ' + (el.getAttribute('href') || '');
             return !HINTS.CHAT_EXCLUDE.test(sig);
         });
-    }
-
-    function newsChatCount() {
-        const cands = newsChatCandidates();
         if (!cands.length) return null;
+
         let max = 0;
         cands.forEach((holder) => {
             [holder].concat(Array.from(holder.querySelectorAll('em, span, i, b, strong'))).forEach((node) => {
@@ -340,10 +334,10 @@
 
     const W = () => CONFIG.NOTIFY_LINE_WIDTH;
 
-    function entryLines(i, withLabel) {
+    /* 단건 알림: 제목에 종류, 본문 두 줄 */
+    function detailBody(i) {
         const who = [i.cafe, i.author].filter(Boolean).join(' · ');
-        const head = clipWidth((withLabel ? '[' + i.type.label + '] ' : '') + who, W());
-        const out = [head || clipWidth(i.text, W())];
+        const out = [clipWidth(who || i.text, W())];
         if (i.content) {
             const pad = CONFIG.CONTENT_PREFIX.length + 1;
             out.push(CONFIG.CONTENT_PREFIX + clipWidth(i.content, W() - pad));
@@ -352,27 +346,48 @@
         return out.join('\n');
     }
 
-    /* 안 읽은 것 전부를 하나의 알림으로. 고정 tag라 이전 알림을 갱신한다. */
-    function sendSummary(items, chatCount) {
+    /* 목록 한 줄 — 카페가 여러 곳이면 카페명도 넣는다 */
+    function compactLine(i, showCafe) {
+        const head = '[' + i.type.tag + '] ' + [showCafe ? i.cafe : '', i.author].filter(Boolean).join('·');
+        return clipWidth(head + ' ' + i.content, W());
+    }
+
+    /* 목록 두 줄 */
+    function detailLines(i) {
+        const who = [i.cafe, i.author].filter(Boolean).join(' · ');
+        const out = [clipWidth('[' + i.type.label + '] ' + who, W())];
+        if (i.content) {
+            const pad = CONFIG.CONTENT_PREFIX.length + 1;
+            out.push(CONFIG.CONTENT_PREFIX + clipWidth(i.content, W() - pad));
+        }
+        return out.join('\n');
+    }
+
+    function buildSummary(items, chatCount) {
         const total = items.length + (chatCount || 0);
-        if (!total) return;
+        if (!total) return null;
 
         if (items.length === 1 && !chatCount) {
             const i = items[0];
-            enqueue('[네이버 카페] ' + i.type.label, entryLines(i, false), i.href, SUMMARY_TAG);
-            return;
+            return { title: '[네이버 카페] ' + i.type.label, body: detailBody(i), url: i.href };
         }
+
+        const cafes = new Set(items.map((i) => i.cafe).filter(Boolean));
+        const showCafe = cafes.size > 1;
 
         const parts = [];
         if (chatCount) parts.push('💬 안 읽은 채팅 ' + chatCount + '건');
         const n = CONFIG.MERGE_MAX_ITEMS;
-        items.slice(0, n).forEach((i) => parts.push(entryLines(i, true)));
+        items.slice(0, n).forEach((i) => {
+            parts.push(CONFIG.LIST_STYLE === 'detail' ? detailLines(i) : compactLine(i, showCafe));
+        });
         if (items.length > n) parts.push('… 외 ' + (items.length - n) + '건');
 
-        enqueue('[네이버 카페] 안 읽은 소식 ' + total + '건',
-                parts.join('\n'),
-                items[0] ? items[0].href : '',
-                SUMMARY_TAG);
+        return {
+            title: '[네이버 카페] 안 읽은 소식 ' + total + '건',
+            body: parts.join('\n'),
+            url: items[0] ? items[0].href : ''
+        };
     }
 
     /* ============================================================
@@ -383,7 +398,6 @@
     function scanNews() {
         const initialized = store.get(KEY.INIT, false);
 
-        /* 채팅 */
         let chatCur = null, chatIncreased = false;
         if (CONFIG.ENABLE_CHAT_ON_NEWS) {
             chatCur = newsChatCount();
@@ -397,7 +411,6 @@
             lastStat.chat = Number(store.get(KEY.CHAT_TALK, 0)) || 0;
         }
 
-        /* 피드 */
         const items = collectFeedItems().map(buildItem).filter((i) => i.type);
         const unreadItems = items.filter((i) => i.unread);
 
@@ -424,16 +437,14 @@
         saveSeen(allKeys.concat(loadSeen()));
 
         if (CONFIG.NOTIFY_MODE === 'summary') {
-            // 새 항목이 있거나 채팅이 늘었을 때만 알림을 갱신한다
             if (fresh.length || chatIncreased) {
-                sendSummary(enabled, CONFIG.ENABLE_CHAT_ON_NEWS ? (chatCur || 0) : 0);
+                const s = buildSummary(enabled, CONFIG.ENABLE_CHAT_ON_NEWS ? (chatCur || 0) : 0);
+                if (s) enqueue(s.title, s.body, s.url, SUMMARY_TAG);
             }
         } else {
-            if (chatIncreased) {
-                enqueue('[네이버 카페] 채팅 알림', '새로운 채팅 메시지가 도착했습니다.');
-            }
+            if (chatIncreased) enqueue('[네이버 카페] 채팅 알림', '새로운 채팅 메시지가 도착했습니다.');
             fresh.slice().reverse().forEach((i) =>
-                enqueue('[네이버 카페] ' + i.type.label, entryLines(i, false), i.href));
+                enqueue('[네이버 카페] ' + i.type.label, detailBody(i), i.href));
         }
         paint();
     }
@@ -448,9 +459,8 @@
         lastStat.chat = cur;
         lastStat.scanned = true;
         const prev = Number(store.get(KEY.CHAT_TALK, 0)) || 0;
-        if (!talkInitialized) {
-            talkInitialized = true;
-        } else if (cur > prev) {
+        if (!talkInitialized) talkInitialized = true;
+        else if (cur > prev) {
             enqueue('[네이버 카페] 채팅 알림',
                     '새로운 채팅 메시지가 도착했습니다.' + (cur > 1 ? ' (안 읽음 ' + cur + ')' : ''));
         }
@@ -469,47 +479,30 @@
     function diagnose() {
         const out = [];
         out.push('=== 카페 알리미 ' + VERSION + ' 진단 ===');
-        out.push('모드: ' + (IS_TALK ? '채팅 창' : '내 소식') + ' / 알림방식: ' + CONFIG.NOTIFY_MODE);
+        out.push('모드: ' + (IS_TALK ? '채팅 창' : '내 소식') +
+                 ' / 알림: ' + CONFIG.NOTIFY_MODE + ' / 목록: ' + CONFIG.LIST_STYLE);
         const N = getNotificationCtor();
         out.push('권한: ' + (N ? N.permission : '없음') + ' / 감시: ' + (running ? '동작' : '정지'));
 
         if (IS_TALK) {
-            out.push('\n--- 채팅 배지 ---');
-            let n = 0;
-            document.querySelectorAll('em, span, i, b, strong, div').forEach((node) => {
-                if (node.children.length) return;
-                const t = norm(node.textContent);
-                if (!/^\d{1,3}\+?$/.test(t)) return;
-                let bg = '';
-                try { bg = getComputedStyle(node).backgroundColor; } catch (e) { return; }
-                if (n < 10) out.push(`  "${t}" bg=${bg} 초록=${isGreen(parseRGB(bg))}`);
-                n++;
-            });
-            out.push('  합산 안읽음 = ' + talkUnreadCount());
+            out.push('\n합산 안읽음 = ' + talkUnreadCount());
         } else {
-            out.push('\n채팅 뱃지 = ' + newsChatCount() + ' (사이드바 기준, 네이버 갱신이 몇 분 늦을 수 있음)');
+            out.push('\n채팅 뱃지 = ' + newsChatCount() + ' (네이버 갱신이 몇 분 늦을 수 있음)');
             const items = collectFeedItems().map(buildItem);
             const un = items.filter((i) => i.unread);
             out.push('스캔 ' + items.length + '건 / 안읽음 ' + un.length + '건');
+
             const enabled = un.filter((i) => i.type && CONFIG[i.type.cfg]);
+            const s = buildSummary(enabled, CONFIG.ENABLE_CHAT_ON_NEWS ? (newsChatCount() || 0) : 0);
             out.push('\n--- 지금 보낼 알림 미리보기 ---');
-            if (enabled.length || newsChatCount()) {
-                const c = CONFIG.ENABLE_CHAT_ON_NEWS ? (newsChatCount() || 0) : 0;
-                const total = enabled.length + c;
-                if (enabled.length === 1 && !c) {
-                    out.push('  제목: [네이버 카페] ' + enabled[0].type.label);
-                    out.push(entryLines(enabled[0], false).split('\n').map(l => '  ' + l).join('\n'));
-                } else {
-                    out.push('  제목: [네이버 카페] 안 읽은 소식 ' + total + '건');
-                    if (c) out.push('  💬 안 읽은 채팅 ' + c + '건');
-                    enabled.slice(0, CONFIG.MERGE_MAX_ITEMS).forEach((i) =>
-                        out.push(entryLines(i, true).split('\n').map(l => '  ' + l).join('\n')));
-                }
+            if (s) {
+                out.push('  ' + s.title);
+                out.push(s.body.split('\n').map((l) => '  ' + l).join('\n'));
+                out.push('  (윈도우는 본문을 4줄 안팎에서 잘라냅니다)');
             } else out.push('  (없음)');
 
             items.slice(0, 3).forEach((f, i) => {
                 out.push('\n[' + i + '] ' + (f.unread ? '● 안읽음' : '○ 읽음') + ' (' + (f.type ? f.type.id : '?') + ')');
-                out.push('  RAW줄: ' + JSON.stringify(f.lines));
                 out.push('  카페=[' + f.cafe + '] 작성자=[' + f.author + '] 내용=[' + truncate(f.content, 40) + ']');
             });
         }
