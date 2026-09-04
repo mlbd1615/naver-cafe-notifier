@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v7
+// @name         네이버 카페 '내 소식' 데스크톱 알리미 v8
 // @namespace    https://section.cafe.naver.com/
-// @version      7.0.0
-// @description  네이버 카페 '내 소식'의 안 읽은 댓글·답글·채팅을 감지해 데스크톱 알림을 1회만 띄웁니다.
+// @version      8.0.0
+// @description  네이버 카페 '내 소식'의 안 읽은 댓글·답글·채팅을 감지해 데스크톱 알림을 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
 // @icon         https://cafe.naver.com/favicon.ico
@@ -17,6 +17,8 @@
 
 (function () {
     'use strict';
+
+    const VERSION = 'v8';
 
     /* ============================================================
      * 1. 설정
@@ -59,8 +61,10 @@
 
     const HINTS = {
         RE_ANY: /좋아해요|좋아합니다|댓글|답글/,
-        RE_TIME: /(\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2})/,
-        RE_TIME_G: /\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제/g,
+        RE_TIME: /(방금\s*전|\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2})/,
+        /* 키를 만들 때 지울 것 = 시간 표기뿐.
+         * 숫자(댓글 건수)는 남겨야 건수가 늘었을 때 새 알림이 나간다. */
+        RE_TIME_G: /방금\s*전|\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2}\.?/g,
         JUNK_CLASS: /popover|pop_over|tooltip|layer|dropdown|modal|gnb_/i,
         JUNK_ANCESTOR: '[class*="popover" i], [class*="pop_over" i], [class*="tooltip" i], [class*="layer" i]',
         CHAT_EXCLUDE: /네이버톡|스마트봇|smartbot|mail|메일|쪽지/i
@@ -218,7 +222,7 @@
     }
 
     /* ============================================================
-     * 6. 피드 감지 및 항목 파싱
+     * 6. 피드 감지 및 파싱
      * ========================================================== */
     function collectFeedItems() {
         const picked = [];
@@ -241,8 +245,6 @@
         return leaves.slice(0, CONFIG.MAX_FEED_ITEMS);
     }
 
-    /* 어느 줄에서 종류가 판정됐는지(ti)까지 돌려준다.
-     * 작성자와 내용의 위치를 그 줄 기준으로 잡기 위함. */
     function classify(lines, text) {
         for (let li = 0; li < lines.length; li++) {
             for (const t of TYPES) if (t.re.test(lines[li])) return { type: t, ti: li };
@@ -251,7 +253,6 @@
         return { type: null, ti: -1 };
     }
 
-    /* 마지막 줄은 "카페이름 · 8시간 전" 형태 */
     function splitCafeLine(line) {
         const parts = (line || '').split(/\s*·\s*/);
         if (parts.length < 2) return { cafe: '', time: '' };
@@ -261,21 +262,26 @@
     function buildItem({ el, raw, text }) {
         const lines = raw.split('\n').map(norm).filter(Boolean);
         const { type, ti } = classify(lines, text);
-
         const { cafe, time } = splitCafeLine(lines[lines.length - 1]);
 
-        // 작성자: 종류 문구가 있는 줄에서 앞부분을 떼거나, 그 앞 줄을 쓴다
+        // 작성자
         let author = '';
         if (ti >= 0) {
             const m = /^(.+?)\s*(?:님이)?\s*내\s*(?:글|댓글)(?:을|의)/.exec(lines[ti]);
             if (m && m[1]) author = norm(m[1]);
             else if (ti > 0) author = lines[ti - 1];
         }
-        if (/^\d+명$/.test(author)) author = ''; // "1명이 좋아해요" 같은 경우
+        if (/^\d+명$/.test(author)) author = '';
 
-        // 내용: 종류 줄 다음 줄 (단, 마지막 카페 줄은 제외)
-        let content = '';
-        let subject = '';
+        // 묶인 건수 — "내 글의 댓글 2" 의 끝 숫자
+        let count = 1;
+        if (ti >= 0) {
+            const cm = /(\d+)\s*$/.exec(lines[ti]);
+            if (cm) count = parseInt(cm[1], 10) || 1;
+        }
+
+        // 내용 / 게시글 제목
+        let content = '', subject = '';
         if (ti >= 0) {
             const body = lines.slice(ti + 1, lines.length - 1);
             content = body[0] || '';
@@ -285,23 +291,24 @@
         const link = el.querySelector('a[href]');
         const href = link ? link.href : '';
 
-        /* ★ 중복 알림 방지의 핵심 ★
-         * 상대 시간("1분 전" → "2분 전")과 변하는 숫자(댓글 수, 좋아요 수)를
-         * 키에서 제거한다. 이걸 안 하면 새로고침마다 키가 달라져 매번 새 알림이 뜬다. */
-        const sig = norm(text.replace(HINTS.RE_TIME_G, '').replace(/\d+/g, '#'));
+        /* 키에서 지우는 것은 시간 표기뿐이다.
+         *  - "1분 전" → "2분 전" 으로 매분 키가 바뀌던 문제를 막고
+         *  - 댓글 건수(2 → 3)는 남겨서 새 댓글이 오면 다시 알린다 */
+        const sig = norm(text.replace(HINTS.RE_TIME_G, ''));
         const key = (href ? href.split('?')[0] : 'nolink') + '::' + hashText(sig);
 
         const ur = unreadInfo(el);
 
-        return { key, type, lines, text, cafe, time, author, content, subject,
+        return { key, type, lines, text, cafe, time, author, content, subject, count,
                  href, el, unread: ur.unread, color: ur.color };
     }
 
-    /* 알림 본문: 카페이름 / 작성자 / 내용 */
+    /* 알림 본문: 카페이름 / 작성자(N건) / 내용 */
     function bodyOf(i) {
         const p = [];
         if (i.cafe) p.push(i.cafe);
-        if (i.author) p.push(i.author);
+        const who = i.author + (i.count > 1 ? ' (' + i.count + '건)' : '');
+        if (norm(who)) p.push(norm(who));
         if (i.content) p.push(truncate(i.content, 100));
         if (CONFIG.SHOW_SUBJECT && i.subject) p.push('— ' + truncate(i.subject, 60));
         if (!p.length) p.push(truncate(i.text, 100));
@@ -311,7 +318,7 @@
     function shortOf(i) {
         const who = [i.cafe, i.author].filter(Boolean).join(' · ');
         const what = truncate(i.content || i.text, 40);
-        return who ? who + ' — ' + what : what;
+        return (who ? who + ' — ' : '') + what;
     }
 
     /* ============================================================
@@ -360,7 +367,6 @@
             events.push({ kind: 'feed', item: it });
         }
 
-        // 알림을 띄운 즉시 기록해야 같은 항목이 다시 잡히지 않는다
         saveSeen(allKeys.concat(loadSeen()));
         dispatch(events);
         paint();
@@ -395,7 +401,7 @@
      * ========================================================== */
     function diagnose() {
         const out = [];
-        out.push('=== 카페 알리미 v7 진단 ===');
+        out.push('=== 카페 알리미 ' + VERSION + ' 진단 ===');
         const N = getNotificationCtor();
         out.push('권한: ' + (N ? N.permission : '없음') + ' / 감시: ' + (running ? '동작' : '정지'));
 
@@ -413,10 +419,10 @@
                      (CONFIG[t.cfg] ? '' : '  [알림 꺼짐]'));
         });
         items.slice(0, 6).forEach((f, i) => {
-            out.push(`[${i}] ${f.unread ? '● 안읽음' : '○ 읽음'} (${f.type ? f.type.id : '?'})`);
+            out.push(`[${i}] ${f.unread ? '● 안읽음' : '○ 읽음'} (${f.type ? f.type.id : '?'}) ${f.count}건`);
             out.push('  카페=' + (f.cafe || '-') + ' / 작성자=' + (f.author || '-') + ' / 시간=' + (f.time || '-'));
             out.push('  내용=' + truncate(f.content, 50));
-            out.push('  key=' + f.key.slice(-14));
+            out.push('  key=…' + f.key.slice(-12));
         });
 
         const text = out.join('\n');
@@ -471,7 +477,7 @@
             'font:12px/1.5 sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35)';
 
         const head = document.createElement('div');
-        head.textContent = '🔔 카페 알리미';
+        head.textContent = '🔔 카페 알리미 ' + VERSION;
         head.style.cssText = 'font-weight:700;color:#03c75a;margin-bottom:3px;font-size:12px';
 
         panelMain = document.createElement('div');
@@ -610,7 +616,7 @@
     /* ============================================================
      * 11. 시작
      * ========================================================== */
-    console.log('%c[카페알리미 v7] 로드됨', 'background:#03c75a;color:#fff;padding:2px 6px', location.href);
+    console.log('%c[카페알리미 ' + VERSION + '] 로드됨', 'background:#03c75a;color:#fff;padding:2px 6px', location.href);
 
     mountPanel();
     setInterval(mountPanel, 1000);
@@ -622,6 +628,6 @@
     window.addEventListener('load', () => setTimeout(boot, 500));
 
     try {
-        unsafeWindow.__cafeNotifier = { diagnose, reset, scan: safeScan, CONFIG, TYPES, start, stop };
+        unsafeWindow.__cafeNotifier = { VERSION, diagnose, reset, scan: safeScan, CONFIG, TYPES, start, stop };
     } catch (e) { log('unsafeWindow 노출 실패', e); }
 })();
