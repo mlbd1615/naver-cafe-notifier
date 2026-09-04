@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v15
+// @name         네이버 카페 '내 소식' 알리미
 // @namespace    https://section.cafe.naver.com/
-// @version      15.0.0
+// @version      16.0.0
 // @description  네이버 카페 '내 소식'의 안 읽은 댓글·답글·채팅을 데스크톱 알림으로 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
@@ -19,45 +19,28 @@
 (function () {
     'use strict';
 
-    const VERSION = 'v15';
+    const VERSION = 'v16';
 
     /* ============================================================
-     *  설정
+     *  기본값 — 실제 켜고 끄기는 화면의 패널에서 하며 저장된다
      * ========================================================== */
     const CONFIG = {
+        DEFAULT_COMMENT: true,    // 댓글 알림
+        DEFAULT_REPLY:   true,    // 답글 알림
+        DEFAULT_CHAT:    true,    // 채팅 알림
 
-        /* ── 알림 켜기/끄기 ────────────────────────────── */
-        ALERT_COMMENT: true,      // 댓글  ("OOO 내 글의 댓글")
-        ALERT_REPLY:   true,      // 답글  ("OOO 내 댓글의 답글")
-        ALERT_CHAT:    true,      // 채팅
-        ALERT_LIKE_COMMENT: false,// 내 댓글 좋아요
-        ALERT_LIKE_POST:    false,// 내 글 좋아요
-
-        /* ── 내용 비공개 ───────────────────────────────
-         * 회사 등 화면이 노출되는 곳에서 쓸 때.
-         * 둘 다 켜면 "새 소식 3건이 도착했습니다" 정도만 나온다. */
-        HIDE_CONTENT: false,      // 댓글·답글 본문 숨김
+        HIDE_CONTENT: false,      // 본문 숨김 (회사 등에서)
         HIDE_SOURCE:  false,      // 카페명·작성자 숨김
 
-        /* ── 화면 표시 ────────────────────────────────── */
-        SHOW_PANEL: false,        // 페이지 우측 하단 상태 패널 (Alt+N 으로 여닫기)
+        RELOAD_INTERVAL_SEC: 30,  // 15초 미만 비권장
+        CHAT_SOURCE: 'news',      // 'news' = 사이드바 뱃지 / 'talk' = 채팅 창
+        ONLY_UNREAD: true,
 
-        /* ── 동작 ─────────────────────────────────────── */
-        RELOAD_INTERVAL_SEC: 30,  // 15초 미만은 권장하지 않음
-        CHAT_SOURCE: 'news',      // 'news' = 내 소식 사이드바 뱃지(네이버 갱신이 몇 분 느림)
-                                  // 'talk' = 채팅 창을 띄워두고 감지(빠름)
-        ONLY_UNREAD: true,        // 안 읽은 항목(초록 배경)만 알림
-
-        /* ── 알림 본문 구성 ────────────────────────────
-         *  'latest'  : 최신 항목 하나만 (건수는 제목에)  ← 기본
-         *  'compact' : 한 항목 한 줄로 나열
-         *  'detail'  : 한 항목 두 줄로 나열
-         * 윈도우가 본문을 4줄 안팎에서 잘라내는 건 코드로 못 바꾼다. */
-        LIST_STYLE: 'latest',
+        LIST_STYLE: 'latest',     // 'latest' | 'compact' | 'detail'
         TITLE_PREFIX: '[네이버 카페]',
 
-        /* ── 세부 튜닝 ────────────────────────────────── */
-        NOTIFY_MODE: 'summary',   // 'summary' | 'each'
+        /* 세부 */
+        NOTIFY_MODE: 'summary',
         MERGE_MAX_ITEMS: 5,
         NOTIFY_LINE_WIDTH: 52,
         CONTENT_PREFIX: '└ ',
@@ -76,22 +59,18 @@
         DEBUG: false
     };
 
-    /* ============================================================ */
     const SUMMARY_TAG = CONFIG.BASE_TAG + '-summary';
     const NEWS_PATH_RE = /\/ca-fe\/home\/my-news/;
     const IS_TALK = /talk\.cafe\.naver\.com$/.test(location.hostname);
-    const CHAT_ON_NEWS = CONFIG.ALERT_CHAT && CONFIG.CHAT_SOURCE === 'news';
-    const CHAT_ON_TALK = CONFIG.ALERT_CHAT && CONFIG.CHAT_SOURCE === 'talk';
 
+    /* 좋아요는 알림 대상이 아니지만, 댓글로 오분류되지 않도록 분류 규칙은 남겨둔다 */
     const TYPES = [
-        { id: 'reply', re: /내\s*(댓글|글)의\s*답글/, label: '새 답글', tag: '답글',
-          msg: '새 답글이 도착했습니다.', cfg: 'ALERT_REPLY' },
+        { id: 'reply',   re: /내\s*(댓글|글)의\s*답글/, label: '새 답글', tag: '답글',
+          msg: '새 답글이 도착했습니다.', pref: 'reply',   ui: true },
         { id: 'comment', re: /내\s*(글|댓글)의\s*댓글/, label: '새 댓글', tag: '댓글',
-          msg: '새 댓글이 도착했습니다.', cfg: 'ALERT_COMMENT' },
-        { id: 'like_comment', re: /좋아해요/, label: '내 댓글 좋아요', tag: '댓글♡',
-          msg: '내 댓글에 좋아요가 눌렸습니다.', cfg: 'ALERT_LIKE_COMMENT' },
-        { id: 'like_post', re: /좋아합니다/, label: '내 글 좋아요', tag: '글♡',
-          msg: '내 글에 좋아요가 눌렸습니다.', cfg: 'ALERT_LIKE_POST' }
+          msg: '새 댓글이 도착했습니다.', pref: 'comment', ui: true },
+        { id: 'like_comment', re: /좋아해요/,   label: '좋아요', tag: '♡', msg: '', pref: null, ui: false },
+        { id: 'like_post',    re: /좋아합니다/, label: '좋아요', tag: '♡', msg: '', pref: null, ui: false }
     ];
 
     const HINTS = {
@@ -105,12 +84,12 @@
     };
 
     const KEY = {
-        CHAT_NEWS: 'ncn_chat_news', CHAT_TALK: 'ncn_chat_talk',
+        PREFS: 'ncn_prefs', CHAT_NEWS: 'ncn_chat_news', CHAT_TALK: 'ncn_chat_talk',
         SEEN: 'ncn_seen_keys', INIT: 'ncn_initialized'
     };
 
     /* ============================================================
-     *  유틸
+     *  유틸 / 저장소
      * ========================================================== */
     const log = (...a) => { if (CONFIG.DEBUG) console.log('%c[카페알리미]', 'color:#03c75a;font-weight:700', ...a); };
     const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
@@ -134,6 +113,25 @@
         get(k, d) { try { return GM_getValue(k, d); } catch (e) { return d; } },
         set(k, v) { try { GM_setValue(k, v); } catch (e) { log('저장 실패', e); } }
     };
+
+    /* 사용자 설정 — 새로고침해도 유지되도록 저장한다 */
+    const PREFS = (function () {
+        const base = {
+            comment: CONFIG.DEFAULT_COMMENT,
+            reply:   CONFIG.DEFAULT_REPLY,
+            chat:    CONFIG.DEFAULT_CHAT,
+            minimized: false
+        };
+        const raw = store.get(KEY.PREFS, '{}');
+        let saved = {};
+        try { saved = typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch (e) { saved = {}; }
+        return Object.assign(base, saved);
+    })();
+    function savePrefs() { store.set(KEY.PREFS, JSON.stringify(PREFS)); }
+
+    const CHAT_ON_NEWS = () => PREFS.chat && CONFIG.CHAT_SOURCE === 'news';
+    const CHAT_ON_TALK = () => PREFS.chat && CONFIG.CHAT_SOURCE === 'talk';
+    const alertOn = (type) => !!(type && type.pref && PREFS[type.pref]);
 
     function hashText(str) {
         let h = 5381;
@@ -238,7 +236,7 @@
     }
 
     /* ============================================================
-     *  피드 감지 및 파싱
+     *  피드 파싱
      * ========================================================== */
     function collectFeedItems() {
         const picked = [];
@@ -268,11 +266,9 @@
         for (let i = lines.length - 1; i >= 0; i--)
             if (HINTS.RE_TIME.test(lines[i])) { tIdx = i; break; }
         if (tIdx < 0) return { cafe: '', time: '', footStart: lines.length };
-
         const parts = lines[tIdx].split(HINTS.SEP).map(norm).filter(Boolean);
         if (parts.length >= 2)
             return { cafe: parts.slice(0, -1).join(' · '), time: parts[parts.length - 1], footStart: tIdx };
-
         const prev = tIdx > 0 ? lines[tIdx - 1] : '';
         const ok = prev && prev.length <= 40 && !HINTS.RE_TIME.test(prev);
         return { cafe: ok ? prev : '', time: norm(lines[tIdx]), footStart: ok ? tIdx - 1 : tIdx };
@@ -299,16 +295,16 @@
         const sig = norm(text.replace(HINTS.RE_TIME_G, ''));
         const key = (href ? href.split('?')[0] : 'nolink') + '::' + hashText(sig);
 
-        let unread = false, color = '', node = el;
+        let unread = false, node = el;
         for (let i = 0; i < 4 && node && node !== document.body; i++, node = node.parentElement) {
             let bg = '';
             try { bg = getComputedStyle(node).backgroundColor; } catch (e) { continue; }
             const c = parseRGB(bg);
             if (!c || c.a < 0.05) continue;
             if (Math.abs(c.r - c.g) <= 2 && Math.abs(c.g - c.b) <= 2) continue;
-            if (c.g > c.r && c.g > c.b) { unread = true; color = bg; break; }
+            if (c.g > c.r && c.g > c.b) { unread = true; break; }
         }
-        return { key, type, lines, text, cafe, time, author, content, subject, href, el, unread, color };
+        return { key, type, lines, text, cafe, time, author, content, subject, href, el, unread };
     }
 
     /* ============================================================
@@ -328,30 +324,23 @@
         if (CONFIG.HIDE_CONTENT || !i.content) return '';
         return CONFIG.CONTENT_PREFIX + clipWidth(i.content, W() - PAD());
     }
-
-    /* 단건 알림 본문 */
     function detailBody(i) {
         const out = [];
-        const w = whoLine(i, false);
-        if (w) out.push(w);
-        const c = contentLine(i);
-        if (c) out.push(c);
+        const w = whoLine(i, false); if (w) out.push(w);
+        const c = contentLine(i);    if (c) out.push(c);
         if (CONFIG.SHOW_SUBJECT && !CONFIG.HIDE_CONTENT && i.subject) out.push('  ' + clipWidth(i.subject, W() - 3));
-        if (!out.length) out.push(i.type.msg);   // 전부 숨김일 때
+        if (!out.length) out.push(i.type.msg || '새 소식이 도착했습니다.');
         return out.join('\n');
     }
-
-    /* "답글 1 · 댓글 2 · 채팅 1" — 0인 종류는 생략 */
     function countsLine(items, chatCount) {
         const parts = [];
-        TYPES.forEach((t) => {
+        TYPES.filter((t) => t.ui).forEach((t) => {
             const n = items.filter((i) => i.type.id === t.id).length;
             if (n) parts.push(t.tag + ' ' + n);
         });
         if (chatCount) parts.push('채팅 ' + chatCount);
         return parts.join(' · ');
     }
-
     function compactLine(i, showCafe) {
         const who = CONFIG.HIDE_SOURCE ? '' : [showCafe ? i.cafe : '', i.author].filter(Boolean).join('·');
         const head = '[' + i.type.tag + ']' + (who ? ' ' + who : '');
@@ -362,21 +351,14 @@
     function buildSummary(items, chatCount) {
         const total = items.length + (chatCount || 0);
         if (!total) return null;
-
-        if (!items.length) {   // 채팅만
-            return { title: P() + '채팅 ' + chatCount,
-                     body: '새로운 채팅 메시지가 도착했습니다.', url: '' };
-        }
-        if (items.length === 1 && !chatCount) {   // 소식 1건
+        if (!items.length)
+            return { title: P() + '채팅 ' + chatCount, body: '새로운 채팅 메시지가 도착했습니다.', url: '' };
+        if (items.length === 1 && !chatCount)
             return { title: P() + items[0].type.label, body: detailBody(items[0]), url: items[0].href };
-        }
 
-        /* 건수는 제목으로 — 굵게 나와서 한눈에 들어온다 */
         const title = P() + countsLine(items, chatCount);
-
-        if (CONFIG.HIDE_CONTENT && CONFIG.HIDE_SOURCE) {
+        if (CONFIG.HIDE_CONTENT && CONFIG.HIDE_SOURCE)
             return { title, body: '새 소식 ' + total + '건이 도착했습니다.', url: items[0].href };
-        }
 
         const parts = [];
         if (CONFIG.LIST_STYLE === 'latest') {
@@ -385,8 +367,7 @@
             const c = contentLine(i);   if (c) parts.push(c);
         } else {
             const cafes = new Set(items.map((i) => i.cafe).filter(Boolean));
-            const showCafe = cafes.size > 1;
-            const n = CONFIG.MERGE_MAX_ITEMS;
+            const showCafe = cafes.size > 1, n = CONFIG.MERGE_MAX_ITEMS;
             items.slice(0, n).forEach((i) => {
                 if (CONFIG.LIST_STYLE === 'detail') {
                     const w = whoLine(i, true); if (w) parts.push(w);
@@ -408,7 +389,7 @@
         const initialized = store.get(KEY.INIT, false);
 
         let chatCur = null, chatIncreased = false;
-        if (CHAT_ON_NEWS) {
+        if (CHAT_ON_NEWS()) {
             chatCur = newsChatCount();
             lastStat.chat = chatCur;
             if (chatCur !== null) {
@@ -416,9 +397,9 @@
                 if (initialized && chatCur > prev) chatIncreased = true;
                 if (chatCur !== prev) store.set(KEY.CHAT_NEWS, chatCur);
             }
-        } else if (CHAT_ON_TALK) {
+        } else if (CHAT_ON_TALK()) {
             lastStat.chat = Number(store.get(KEY.CHAT_TALK, 0)) || 0;
-        }
+        } else lastStat.chat = 0;
 
         const items = collectFeedItems().map(buildItem).filter((i) => i.type);
         const unreadItems = items.filter((i) => i.unread);
@@ -433,20 +414,19 @@
         if (!initialized) {
             saveSeen(allKeys);
             store.set(KEY.INIT, true);
-            log('최초 실행 —', allKeys.length, '건 등록');
             paint();
             return;
         }
 
         const pool = CONFIG.ONLY_UNREAD ? unreadItems : items;
-        const enabled = pool.filter((i) => CONFIG[i.type.cfg]);
+        const enabled = pool.filter((i) => alertOn(i.type));
         const seenSet = new Set(loadSeen());
         const fresh = enabled.filter((i) => !seenSet.has(i.key));
         saveSeen(allKeys.concat(loadSeen()));
 
         if (CONFIG.NOTIFY_MODE === 'summary') {
             if (fresh.length || chatIncreased) {
-                const s = buildSummary(enabled, CHAT_ON_NEWS ? (chatCur || 0) : 0);
+                const s = buildSummary(enabled, CHAT_ON_NEWS() ? (chatCur || 0) : 0);
                 if (s) enqueue(s.title, s.body, s.url, SUMMARY_TAG);
             }
         } else {
@@ -462,9 +442,8 @@
         lastStat.chat = cur; lastStat.scanned = true;
         const prev = Number(store.get(KEY.CHAT_TALK, 0)) || 0;
         if (!talkInitialized) talkInitialized = true;
-        else if (cur > prev) {
+        else if (cur > prev && PREFS.chat)
             enqueue(P() + '채팅 ' + cur, '새로운 채팅 메시지가 도착했습니다.');
-        }
         if (cur !== prev) store.set(KEY.CHAT_TALK, cur);
         paint();
     }
@@ -475,39 +454,28 @@
     }
 
     /* ============================================================
-     *  진단 / 초기화
+     *  진단 / 초기화 (콘솔에서 __cafeNotifier 로도 호출 가능)
      * ========================================================== */
     function diagnose() {
-        const out = [];
-        out.push('=== 카페 알리미 ' + VERSION + ' 진단 ===');
-        out.push('모드: ' + (IS_TALK ? '채팅 창' : '내 소식') + ' / 본문: ' + CONFIG.LIST_STYLE +
-                 ' / 비공개: 내용=' + CONFIG.HIDE_CONTENT + ' 출처=' + CONFIG.HIDE_SOURCE);
+        const out = ['=== 카페 알리미 ' + VERSION + ' ==='];
         const N = getNotificationCtor();
-        out.push('권한: ' + (N ? N.permission : '없음') + ' / 감시: ' + (running ? '동작' : '정지'));
-
-        if (IS_TALK) {
-            out.push('\n합산 안읽음 = ' + talkUnreadCount());
-        } else {
-            out.push('\n채팅 뱃지 = ' + newsChatCount());
+        out.push('권한 ' + (N ? N.permission : '없음') + ' / 설정 ' + JSON.stringify(PREFS));
+        if (IS_TALK) out.push('채팅 안읽음 = ' + talkUnreadCount());
+        else {
+            out.push('채팅 뱃지 = ' + newsChatCount());
             const items = collectFeedItems().map(buildItem);
             const un = items.filter((i) => i.unread);
             out.push('스캔 ' + items.length + '건 / 안읽음 ' + un.length + '건');
-            const enabled = un.filter((i) => i.type && CONFIG[i.type.cfg]);
-            const s = buildSummary(enabled, CHAT_ON_NEWS ? (newsChatCount() || 0) : 0);
-            out.push('\n--- 지금 보낼 알림 ---');
-            if (s) {
-                out.push('  ' + s.title);
-                out.push(s.body.split('\n').map((l) => '  ' + l).join('\n'));
-            } else out.push('  (없음)');
-            items.slice(0, 3).forEach((f, i) => {
-                out.push('\n[' + i + '] ' + (f.unread ? '● 안읽음' : '○ 읽음') + ' (' + (f.type ? f.type.id : '?') + ')');
-                out.push('  카페=[' + f.cafe + '] 작성자=[' + f.author + '] 내용=[' + truncate(f.content, 40) + ']');
-            });
+            const s = buildSummary(un.filter((i) => alertOn(i.type)), CHAT_ON_NEWS() ? (newsChatCount() || 0) : 0);
+            out.push('\n[지금 보낼 알림]');
+            out.push(s ? '  ' + s.title + '\n' + s.body.split('\n').map(l => '  ' + l).join('\n') : '  (없음)');
+            items.slice(0, 3).forEach((f, i) => out.push(
+                '\n[' + i + '] ' + (f.unread ? '●' : '○') + ' (' + (f.type ? f.type.id : '?') + ') ' +
+                '카페=' + f.cafe + ' 작성자=' + f.author + ' 내용=' + truncate(f.content, 30)));
         }
         const text = out.join('\n');
         console.log(text);
-        try { navigator.clipboard.writeText(text); toast('진단 결과 복사 완료'); }
-        catch (e) { toast('진단 결과를 콘솔에 출력했습니다'); }
+        try { navigator.clipboard.writeText(text); toast('진단 결과 복사됨'); } catch (e) { toast('콘솔에 출력됨'); }
         return text;
     }
 
@@ -520,95 +488,187 @@
     }
 
     /* ============================================================
-     *  UI — 기본 숨김, Alt+N 으로 여닫기
+     *  UI — 설정 패널 / 최소화 버블
      * ========================================================== */
-    let panel = null, panelMain = null, panelSub = null, panelFoot = null;
-    let panelVisible = CONFIG.SHOW_PANEL;
+    let root = null, panelMain = null, panelFoot = null, bubbleBadge = null;
 
     function toast(msg) {
         const host = document.documentElement;
         if (!host) return;
         const t = document.createElement('div');
         t.textContent = msg;
-        t.style.cssText = 'position:fixed;right:16px;bottom:150px;z-index:2147483647;padding:10px 14px;' +
-            'border-radius:8px;background:rgba(0,0,0,.85);color:#fff;font:12px/1.4 sans-serif;max-width:280px';
+        t.style.cssText = 'position:fixed;right:16px;bottom:86px;z-index:2147483647;padding:9px 13px;' +
+            'border-radius:8px;background:rgba(0,0,0,.85);color:#fff;font:12px/1.4 sans-serif;max-width:260px';
         host.appendChild(t);
-        setTimeout(() => t.remove(), 4000);
+        setTimeout(() => t.remove(), 3500);
     }
 
-    function mkBtn(label, fn) {
-        const b = document.createElement('button');
-        b.textContent = label;
-        b.style.cssText = 'flex:1;padding:5px 0;border:0;border-radius:5px;cursor:pointer;' +
-            'background:rgba(255,255,255,.18);color:#fff;font:11px sans-serif';
-        b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
-        return b;
+    function mkToggle(label, prefKey) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+            'padding:5px 0;cursor:pointer;user-select:none';
+        const name = document.createElement('span');
+        name.textContent = label;
+        name.style.cssText = 'font-size:12.5px';
+
+        const sw = document.createElement('div');
+        sw.style.cssText = 'width:34px;height:19px;border-radius:10px;padding:2px;box-sizing:border-box;' +
+            'transition:background .15s;flex:none';
+        const knob = document.createElement('div');
+        knob.style.cssText = 'width:15px;height:15px;border-radius:50%;background:#fff;transition:transform .15s';
+        sw.appendChild(knob);
+
+        const render = () => {
+            const on = !!PREFS[prefKey];
+            sw.style.background = on ? '#03c75a' : 'rgba(255,255,255,.22)';
+            knob.style.transform = on ? 'translateX(15px)' : 'translateX(0)';
+            name.style.opacity = on ? '1' : '.55';
+        };
+        row.addEventListener('click', (e) => {
+            e.stopPropagation();
+            PREFS[prefKey] = !PREFS[prefKey];
+            savePrefs(); render(); paint();
+        });
+        render();
+        row.append(name, sw);
+        return row;
     }
 
-    function mountPanel() {
-        if (!panelVisible) return;
-        const host = document.documentElement;
-        if (!host || (panel && host.contains(panel))) return;
+    function clearRoot() {
+        if (root) root.remove();
+        root = null; panelMain = null; panelFoot = null; bubbleBadge = null;
+    }
 
-        panel = document.createElement('div');
-        panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;width:' +
-            (IS_TALK ? '180px' : '235px') + ';padding:9px 11px;border-radius:10px;' +
-            'background:rgba(20,22,26,.9);color:#fff;font:12px/1.5 sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.35)';
+    function unreadTotal() {
+        let n = 0;
+        TYPES.filter((t) => t.ui).forEach((t) => { if (PREFS[t.pref]) n += (lastStat.counts[t.id] || 0); });
+        if (PREFS.chat) n += (lastStat.chat || 0);
+        return n;
+    }
+
+    function buildBubble() {
+        root = document.createElement('div');
+        root.title = '카페 알리미 — 클릭해서 열기';
+        root.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:2147483647;width:46px;height:46px;' +
+            'border-radius:50%;background:rgba(20,22,26,.88);box-shadow:0 3px 12px rgba(0,0,0,.35);' +
+            'display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:20px;' +
+            'user-select:none;transition:transform .12s';
+        root.textContent = '🔔';
+        root.addEventListener('mouseenter', () => { root.style.transform = 'scale(1.08)'; });
+        root.addEventListener('mouseleave', () => { root.style.transform = 'scale(1)'; });
+        root.addEventListener('click', () => { PREFS.minimized = false; savePrefs(); render(); });
+
+        bubbleBadge = document.createElement('div');
+        bubbleBadge.style.cssText = 'position:absolute;top:-2px;right:-2px;min-width:18px;height:18px;padding:0 4px;' +
+            'border-radius:9px;background:#e8443a;color:#fff;font:bold 11px/18px sans-serif;text-align:center;display:none';
+        root.appendChild(bubbleBadge);
+
+        document.documentElement.appendChild(root);
+    }
+
+    function buildPanel() {
+        root = document.createElement('div');
+        root.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:2147483647;width:196px;' +
+            'padding:11px 13px 9px;border-radius:12px;background:rgba(20,22,26,.93);color:#fff;' +
+            'font:12px/1.5 sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.4);user-select:none';
 
         const head = document.createElement('div');
-        head.textContent = (IS_TALK ? '💬 채팅 감시 ' : '🔔 카페 알리미 ') + VERSION;
-        head.style.cssText = 'font-weight:700;color:#03c75a;margin-bottom:3px;font-size:12px';
+        head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px';
+        const title = document.createElement('span');
+        title.textContent = '🔔 카페 알리미';
+        title.style.cssText = 'font-weight:700;color:#03c75a;font-size:12.5px';
+        const min = document.createElement('span');
+        min.textContent = '—';
+        min.title = '최소화';
+        min.style.cssText = 'cursor:pointer;font-size:15px;line-height:1;opacity:.6;padding:0 3px';
+        min.addEventListener('click', (e) => {
+            e.stopPropagation();
+            PREFS.minimized = true; savePrefs(); render();
+        });
+        head.append(title, min);
 
-        panelMain = document.createElement('div'); panelMain.style.cssText = 'font-size:13px;font-weight:600';
-        panelSub = document.createElement('div');  panelSub.style.cssText = 'font-size:11px;opacity:.5';
-        panelFoot = document.createElement('div'); panelFoot.style.cssText = 'font-size:10px;opacity:.45;margin-top:2px';
+        panelMain = document.createElement('div');
+        panelMain.style.cssText = 'font-size:12.5px;font-weight:600;margin-bottom:7px;opacity:.9';
 
-        const row = document.createElement('div');
-        row.style.cssText = 'display:flex;gap:4px;margin-top:8px';
-        if (!IS_TALK) row.appendChild(mkBtn('즉시', () => { stop(); reloadPage(); }));
-        row.appendChild(mkBtn('테스트', () => enqueue(P() + '테스트 알림', '알림이 정상 동작합니다.')));
-        row.appendChild(mkBtn('진단', diagnose));
-        row.appendChild(mkBtn('숨기기', togglePanel));
+        const box = document.createElement('div');
+        box.style.cssText = 'border-top:1px solid rgba(255,255,255,.12);padding-top:4px';
+        if (!IS_TALK) {
+            box.appendChild(mkToggle('댓글 알림', 'comment'));
+            box.appendChild(mkToggle('답글 알림', 'reply'));
+        }
+        box.appendChild(mkToggle('채팅 알림', 'chat'));
 
-        panel.append(head, panelMain, panelSub, panelFoot, row);
-        panel.addEventListener('click', requestPermission);
-        host.appendChild(panel);
+        panelFoot = document.createElement('div');
+        panelFoot.style.cssText = 'font-size:10px;opacity:.4;margin-top:7px;display:flex;' +
+            'justify-content:space-between;align-items:center';
+        const status = document.createElement('span');
+        const tools = document.createElement('span');
+        tools.style.cssText = 'cursor:pointer;text-decoration:underline';
+        tools.textContent = '테스트';
+        tools.addEventListener('click', (e) => {
+            e.stopPropagation();
+            enqueue(P() + '테스트 알림', '알림이 정상 동작합니다.');
+        });
+        panelFoot.append(status, tools);
+        panelFoot._status = status;
+
+        root.append(head, panelMain, box, panelFoot);
+        document.documentElement.appendChild(root);
+    }
+
+    function render() {
+        clearRoot();
+        if (!document.documentElement) return;
+        if (PREFS.minimized) buildBubble(); else buildPanel();
         paint();
     }
 
-    function togglePanel() {
-        panelVisible = !panelVisible;
-        if (panelVisible) mountPanel();
-        else if (panel) { panel.remove(); panel = null; panelMain = null; }
+    function ensureRoot() {
+        if (!root || !document.documentElement.contains(root)) render();
     }
 
     let secLeft = 0;
     function paint() {
+        if (!root) return;
+
+        if (PREFS.minimized) {
+            if (!bubbleBadge) return;
+            const n = unreadTotal();
+            bubbleBadge.textContent = n > 99 ? '99+' : String(n);
+            bubbleBadge.style.display = n > 0 ? 'block' : 'none';
+            return;
+        }
         if (!panelMain) return;
+
         const N = getNotificationCtor();
         if (N && N.permission !== 'granted') {
-            panelMain.textContent = '알림 권한 필요';
-            panelSub.textContent = '패널을 클릭해 허용';
-            panelFoot.textContent = ''; return;
+            panelMain.textContent = '알림 권한이 필요합니다';
+            panelMain.style.cursor = 'pointer';
+            panelMain.onclick = requestPermission;
+            if (panelFoot._status) panelFoot._status.textContent = '여기를 클릭';
+            return;
         }
+        panelMain.onclick = null;
+        panelMain.style.cursor = '';
+
         if (!lastStat.scanned) {
-            panelMain.textContent = '첫 스캔 대기 중…';
-            panelSub.textContent = ''; panelFoot.textContent = ''; return;
+            panelMain.textContent = '확인 중…';
+            if (panelFoot._status) panelFoot._status.textContent = '';
+            return;
         }
-        if (IS_TALK) {
-            panelMain.textContent = '안 읽은 채팅 ' + (lastStat.chat || 0);
-            panelSub.textContent = '이 창을 열어두세요';
-            panelFoot.textContent = CONFIG.TALK_SCAN_INTERVAL_SEC + '초마다 확인'; return;
-        }
-        const on = [], off = [];
-        TYPES.forEach((t) => {
-            const s = t.tag + ' ' + (lastStat.counts[t.id] || 0);
-            (CONFIG[t.cfg] ? on : off).push(s);
+
+        const parts = [];
+        TYPES.filter((t) => t.ui).forEach((t) => {
+            if (!IS_TALK) parts.push(t.tag + ' ' + (lastStat.counts[t.id] || 0));
         });
-        if (CONFIG.ALERT_CHAT) on.push('채팅 ' + (lastStat.chat === null ? '?' : lastStat.chat));
-        panelMain.textContent = on.join(' · ');
-        panelSub.textContent = off.length ? off.join(' · ') + '  (알림 꺼짐)' : '';
-        panelFoot.textContent = running ? '새로고침 ' + secLeft + '초 전' : '대기 중';
+        parts.push('채팅 ' + (lastStat.chat === null ? '?' : lastStat.chat));
+        panelMain.textContent = parts.join(' · ');
+
+        if (panelFoot._status) {
+            panelFoot._status.textContent = IS_TALK
+                ? CONFIG.TALK_SCAN_INTERVAL_SEC + '초마다 확인'
+                : (running ? secLeft + '초 후 확인' : '대기 중');
+        }
     }
 
     /* ============================================================
@@ -655,7 +715,7 @@
     }
 
     function onTargetPage() {
-        if (IS_TALK) return CHAT_ON_TALK;
+        if (IS_TALK) return CHAT_ON_TALK();
         return NEWS_PATH_RE.test(location.pathname);
     }
 
@@ -671,12 +731,11 @@
         const N = getNotificationCtor();
         if (!N) { toast('이 브라우저는 알림을 지원하지 않습니다'); return; }
         if (N.permission === 'granted') { ensureState(); return; }
-        if (N.permission === 'denied') { toast('알림 차단됨.\n주소창 자물쇠 → 알림 → 허용'); paint(); return; }
+        if (N.permission === 'denied') { toast('알림이 차단됨\n주소창 자물쇠 → 알림 → 허용'); return; }
         N.requestPermission().then((p) => {
             paint();
             if (p === 'granted') ensureState();
-            else toast('Alt+N 으로 패널을 열고 클릭해 허용해 주세요');
-        }).catch(() => toast('권한 요청 실패'));
+        }).catch(() => {});
     }
 
     (function hookHistory() {
@@ -691,29 +750,18 @@
         window.addEventListener('popstate', () => setTimeout(ensureState, 500));
     })();
 
-    /* Alt+N 으로 패널 여닫기 (한글 자판의 'ㅜ'도 같은 키) */
-    window.addEventListener('keydown', (e) => {
-        if (!e.altKey || e.ctrlKey || e.metaKey) return;
-        const k = (e.key || '').toLowerCase();
-        if (k !== 'n' && k !== 'ㅜ') return;
-        e.preventDefault();
-        togglePanel();
-    }, true);
-
     /* ============================================================
      *  시작
      * ========================================================== */
-    console.log('%c[카페알리미 ' + VERSION + '] ' + (IS_TALK ? '채팅 모드' : '소식 모드') + ' — Alt+N 패널',
-                'background:#03c75a;color:#fff;padding:2px 6px', location.href);
+    console.log('%c[카페알리미 ' + VERSION + ']', 'background:#03c75a;color:#fff;padding:2px 6px', location.href);
 
-    setInterval(mountPanel, 1000);
-    function boot() { mountPanel(); ensureState(); }
+    function boot() { if (onTargetPage()) ensureRoot(); ensureState(); }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
     else boot();
-    window.addEventListener('load', () => setTimeout(boot, 500));
+    window.addEventListener('load', () => setTimeout(boot, 400));
+    setInterval(() => { if (onTargetPage()) ensureRoot(); }, 1500);
 
     try {
-        unsafeWindow.__cafeNotifier = { VERSION, IS_TALK, diagnose, reset, scan: safeScan,
-                                        panel: togglePanel, CONFIG, TYPES, start, stop };
+        unsafeWindow.__cafeNotifier = { VERSION, diagnose, reset, scan: safeScan, PREFS, CONFIG, render };
     } catch (e) { log('unsafeWindow 노출 실패', e); }
 })();
