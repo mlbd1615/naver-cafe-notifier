@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         네이버 카페 '내 소식' 데스크톱 알리미 v8
+// @name         네이버 카페 '내 소식' 데스크톱 알리미 v9
 // @namespace    https://section.cafe.naver.com/
-// @version      8.0.0
+// @version      9.0.0
 // @description  네이버 카페 '내 소식'의 안 읽은 댓글·답글·채팅을 감지해 데스크톱 알림을 띄웁니다.
 // @author       -
 // @match        https://section.cafe.naver.com/*
@@ -18,7 +18,7 @@
 (function () {
     'use strict';
 
-    const VERSION = 'v8';
+    const VERSION = 'v9';
 
     /* ============================================================
      * 1. 설정
@@ -33,7 +33,8 @@
         ENABLE_LIKE_POST: false,    // "OOO 님이 내 글을 좋아합니다"
 
         ONLY_UNREAD: true,          // 안 읽은 항목(초록 배경)만 알림
-        SHOW_SUBJECT: false,        // 알림 본문에 게시글 제목까지 넣을지
+        SHOW_SUBJECT: false,        // 알림에 게시글 제목까지 넣을지
+        SHOW_TOTAL_COMMENTS: false, // 게시글 전체 댓글 수(💬N)를 알림에 넣을지
 
         NOTIFY_ICON: '',
         DOM_READY_DELAY_MS: 3000,
@@ -62,9 +63,9 @@
     const HINTS = {
         RE_ANY: /좋아해요|좋아합니다|댓글|답글/,
         RE_TIME: /(방금\s*전|\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2})/,
-        /* 키를 만들 때 지울 것 = 시간 표기뿐.
-         * 숫자(댓글 건수)는 남겨야 건수가 늘었을 때 새 알림이 나간다. */
         RE_TIME_G: /방금\s*전|\d+\s*(초|분|시간|일|주|개월|년)\s*전|어제|그저께|그제|\d{4}\.\s?\d{1,2}\.\s?\d{1,2}\.?/g,
+        /* 가운뎃점 후보 — 폰트/유니코드에 따라 다른 문자가 쓰일 수 있다 */
+        SEP: /\s*[·・ㆍ•∙‧|]\s*/,
         JUNK_CLASS: /popover|pop_over|tooltip|layer|dropdown|modal|gnb_/i,
         JUNK_ANCESTOR: '[class*="popover" i], [class*="pop_over" i], [class*="tooltip" i], [class*="layer" i]',
         CHAT_EXCLUDE: /네이버톡|스마트봇|smartbot|mail|메일|쪽지/i
@@ -253,16 +254,41 @@
         return { type: null, ti: -1 };
     }
 
-    function splitCafeLine(line) {
-        const parts = (line || '').split(/\s*·\s*/);
-        if (parts.length < 2) return { cafe: '', time: '' };
-        return { cafe: norm(parts.slice(0, -1).join(' · ')), time: norm(parts[parts.length - 1]) };
+    /* 꼬리말(카페명 · 시간) 파싱.
+     * 두 가지 형태를 모두 처리한다:
+     *   A) 한 줄:  "테스트용카페이다 · 1분 전"
+     *   B) 두 줄:  "테스트용카페이다" / "1분 전"   ← 가운뎃점이 CSS로 그려질 때
+     * footStart 는 본문이 끝나는 지점(= 꼬리말 시작 인덱스). */
+    function parseFooter(lines) {
+        let tIdx = -1;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            if (HINTS.RE_TIME.test(lines[i])) { tIdx = i; break; }
+        }
+        if (tIdx < 0) return { cafe: '', time: '', footStart: lines.length };
+
+        const parts = lines[tIdx].split(HINTS.SEP).map(norm).filter(Boolean);
+        if (parts.length >= 2) {
+            return {
+                cafe: parts.slice(0, -1).join(' · '),
+                time: parts[parts.length - 1],
+                footStart: tIdx
+            };
+        }
+
+        // 시간만 있는 줄 → 바로 앞 줄을 카페명으로 본다 (너무 길면 본문일 가능성이 커 제외)
+        const prev = tIdx > 0 ? lines[tIdx - 1] : '';
+        const looksLikeCafe = prev && prev.length <= 40 && !HINTS.RE_TIME.test(prev);
+        return {
+            cafe: looksLikeCafe ? prev : '',
+            time: norm(lines[tIdx]),
+            footStart: looksLikeCafe ? tIdx - 1 : tIdx
+        };
     }
 
     function buildItem({ el, raw, text }) {
         const lines = raw.split('\n').map(norm).filter(Boolean);
         const { type, ti } = classify(lines, text);
-        const { cafe, time } = splitCafeLine(lines[lines.length - 1]);
+        const { cafe, time, footStart } = parseFooter(lines);
 
         // 작성자
         let author = '';
@@ -273,41 +299,37 @@
         }
         if (/^\d+명$/.test(author)) author = '';
 
-        // 묶인 건수 — "내 글의 댓글 2" 의 끝 숫자
-        let count = 1;
+        // 게시글 전체 댓글 수 (💬N) — 새 소식 건수가 아니다
+        let totalComments = 0;
         if (ti >= 0) {
             const cm = /(\d+)\s*$/.exec(lines[ti]);
-            if (cm) count = parseInt(cm[1], 10) || 1;
+            if (cm) totalComments = parseInt(cm[1], 10) || 0;
         }
 
-        // 내용 / 게시글 제목
-        let content = '', subject = '';
-        if (ti >= 0) {
-            const body = lines.slice(ti + 1, lines.length - 1);
-            content = body[0] || '';
-            subject = body[1] || '';
-        }
+        // 본문: 종류 줄 다음부터 꼬리말 직전까지
+        const body = ti >= 0 ? lines.slice(ti + 1, Math.max(ti + 1, footStart)) : [];
+        const content = body[0] || '';
+        const subject = body[1] || '';
 
         const link = el.querySelector('a[href]');
         const href = link ? link.href : '';
 
-        /* 키에서 지우는 것은 시간 표기뿐이다.
-         *  - "1분 전" → "2분 전" 으로 매분 키가 바뀌던 문제를 막고
-         *  - 댓글 건수(2 → 3)는 남겨서 새 댓글이 오면 다시 알린다 */
+        // 키에서는 시간 표기만 제거한다 (숫자는 남겨야 새 댓글을 구분할 수 있음)
         const sig = norm(text.replace(HINTS.RE_TIME_G, ''));
         const key = (href ? href.split('?')[0] : 'nolink') + '::' + hashText(sig);
 
         const ur = unreadInfo(el);
 
-        return { key, type, lines, text, cafe, time, author, content, subject, count,
+        return { key, type, lines, text, cafe, time, author, content, subject, totalComments,
                  href, el, unread: ur.unread, color: ur.color };
     }
 
-    /* 알림 본문: 카페이름 / 작성자(N건) / 내용 */
+    /* 알림 본문: 카페이름 / 작성자 / 내용 */
     function bodyOf(i) {
         const p = [];
         if (i.cafe) p.push(i.cafe);
-        const who = i.author + (i.count > 1 ? ' (' + i.count + '건)' : '');
+        let who = i.author;
+        if (CONFIG.SHOW_TOTAL_COMMENTS && i.totalComments) who += ' (댓글 ' + i.totalComments + ')';
         if (norm(who)) p.push(norm(who));
         if (i.content) p.push(truncate(i.content, 100));
         if (CONFIG.SHOW_SUBJECT && i.subject) p.push('— ' + truncate(i.subject, 60));
@@ -397,32 +419,24 @@
     }
 
     /* ============================================================
-     * 8. 진단
+     * 8. 진단 — 원본 줄 구조를 그대로 출력한다
      * ========================================================== */
     function diagnose() {
         const out = [];
         out.push('=== 카페 알리미 ' + VERSION + ' 진단 ===');
         const N = getNotificationCtor();
         out.push('권한: ' + (N ? N.permission : '없음') + ' / 감시: ' + (running ? '동작' : '정지'));
-
-        out.push('\n--- 채팅 ---');
-        chatCandidates().slice(0, 6).forEach((el, i) =>
-            out.push(`[${i}] <${el.tagName.toLowerCase()} class="${cls(el)}"> "${truncate(el.textContent, 30)}"`));
         out.push('→ 채팅 수: ' + detectChatCount());
 
-        out.push('\n--- 피드 ---');
         const items = collectFeedItems().map(buildItem);
         const un = items.filter((i) => i.unread);
-        out.push('스캔 ' + items.length + '건 / 안읽음 ' + un.length + '건');
-        TYPES.forEach((t) => {
-            out.push('  ' + t.short + ' : 안읽음 ' + un.filter(i => i.type && i.type.id === t.id).length +
-                     (CONFIG[t.cfg] ? '' : '  [알림 꺼짐]'));
-        });
-        items.slice(0, 6).forEach((f, i) => {
-            out.push(`[${i}] ${f.unread ? '● 안읽음' : '○ 읽음'} (${f.type ? f.type.id : '?'}) ${f.count}건`);
-            out.push('  카페=' + (f.cafe || '-') + ' / 작성자=' + (f.author || '-') + ' / 시간=' + (f.time || '-'));
-            out.push('  내용=' + truncate(f.content, 50));
-            out.push('  key=…' + f.key.slice(-12));
+        out.push('\n스캔 ' + items.length + '건 / 안읽음 ' + un.length + '건');
+
+        items.slice(0, 4).forEach((f, i) => {
+            out.push('\n[' + i + '] ' + (f.unread ? '● 안읽음' : '○ 읽음') + ' (' + (f.type ? f.type.id : '?') + ')');
+            out.push('  RAW줄: ' + JSON.stringify(f.lines));
+            out.push('  카페=[' + f.cafe + '] 작성자=[' + f.author + '] 시간=[' + f.time + ']');
+            out.push('  내용=[' + truncate(f.content, 50) + '] 전체댓글수=' + f.totalComments);
         });
 
         const text = out.join('\n');
